@@ -1,0 +1,162 @@
+# BTC Oracle Configuration
+
+# Символ для прогнозирования
+symbol: "BTCUSDT"
+timeframe: "1m"  # базовый таймфрейм свечей
+
+# Горизонты прогнозирования (в минутах)
+horizons:
+  - 1
+  - 5
+  - 15
+  - 60
+
+# Лимиты производительности
+performance:
+  max_inference_time_ms: 10000  # максимум 10 секунд на полный цикл
+  max_api_latency_ms: 500  # максимум 500мс для API ответа
+  adaptive_mc_passes: true  # адаптивно уменьшать MC passes при превышении времени
+  mc_passes_initial: 10
+  mc_passes_min: 3
+  mc_passes_max: 20
+
+# Пороги для FLAT (движение малое/неразличимое)
+flat:
+  m_flat: 0.05  # порог величины движения (|Δ|/ATR)
+  p_thr: 0.6  # порог вероятности FLAT
+  u_mag_max: 0.3  # максимум uncertainty для magnitude, чтобы считать FLAT уверенным
+
+# Пороги для UNCERTAIN (модель не уверена)
+uncertainty:
+  u_thr: 0.4  # порог uncertainty score
+  consensus_thr: 0.65  # минимум консенсуса ансамбля
+
+# Пороги для Direction (UP/DOWN)
+decision:
+  dir_p_thr: 0.55  # минимум вероятности для направления
+
+# Ансамбль моделей
+ensemble:
+  num_models: 3  # количество моделей в ансамбле
+  mc_passes: 10  # количество MC Dropout прогонов (адаптивно)
+  ema_alpha: 0.1  # коэффициент EMA для весов моделей
+  uncertainty_penalty_lambda: 0.3  # штраф за uncertainty в effective weight
+
+# Pattern Memory
+patterns:
+  discretization_bins: 20  # количество бинов для дискретизации признаков
+  beta_prior_alpha: 1.0  # prior для Beta распределения (direction)
+  beta_prior_beta: 1.0
+  beta_prior_alpha_flat: 1.0  # prior для Beta распределения (flat)
+  beta_prior_beta_flat: 1.0
+  decay_half_life_hours: 168  # период полураспада (7 дней)
+  cooldown_errors_threshold: 5  # количество ошибок для cooldown
+  cooldown_duration_hours: 24
+  min_pattern_samples: 3  # минимум примеров для доверия паттерну
+
+# Fusion (Neural + Memory)
+fusion:
+  memory_credibility_min: 0.3  # минимум credibility для использования памяти
+  neural_confidence_weight: 0.7  # базовый вес нейросети
+
+# Calibration
+calibration:
+  enabled: true
+  method: "temperature"  # "temperature" или "isotonic"
+  temperature_initial: 1.0
+  update_frequency: 100  # обновлять каждые N прогнозов
+
+# Rewards & Penalties
+rewards:
+  # Бины величины движения (m = |Δ|/ATR)
+  bins:
+    tiny:
+      max: 0.05
+      weight: 0.2
+    small:
+      max: 0.25
+      weight: 0.5
+    medium:
+      max: 0.75
+      weight: 1.0
+    large:
+      max: 1.5
+      weight: 1.5
+    extreme:
+      max: null  # > 1.5
+      weight: 2.0
+  
+  # Штрафы за уверенную ошибку
+  confidence_penalty_alpha: 1.5  # усилитель штрафа за уверенность
+  
+  # Streak multipliers
+  streak:
+    model_error_multiplier: 1.2  # множитель штрафа за серию ошибок модели
+    group_error_multiplier: 1.1
+    horizon_error_multiplier: 1.15
+    max_streak_multiplier: 3.0
+  
+  # Coverage discipline для UNCERTAIN
+  target_coverage: 0.7  # 70% прогнозов должны быть не-UNCERTAIN
+  uncertain_penalty_base: 0.1
+  uncertain_penalty_large_move: 0.5  # штраф за пропуск большого движения
+
+# Online Training
+training:
+  online:
+    enabled: true
+    steps_per_candle: 1  # количество шагов обучения на свечу
+    batch_size: 32
+    learning_rate: 0.001
+    learning_rate_min: 0.0001
+    learning_rate_decay: 0.95
+    gradient_clip_norm: 1.0
+    update_frequency: 5  # обучать каждые N свечей
+  
+  replay:
+    buffer_size: 10000
+    recent_ratio: 0.5  # доля свежих примеров
+    priority_alpha: 0.6  # приоритет конфликтных кейсов
+    priority_beta: 0.4
+  
+  distillation:
+    enabled: true
+    top_k_leaders: 2  # топ-K моделей для distillation
+    weight: 0.3  # вес KL divergence в loss
+    min_leader_confidence: 0.7  # минимум уверенности лидера
+  
+  continual:
+    anti_forgetting: true
+    kl_weight: 0.1  # вес KL к предыдущей модели
+    ewc_enabled: false  # EWC опционально
+    ewc_lambda: 0.4
+
+# Drift Detection
+drift:
+  enabled: true
+  window_size: 1000  # размер окна для детекции
+  threshold: 0.15  # порог для триггера drift
+  action: "increase_learning_rate"  # или "reset_weights", "increase_mc_passes"
+
+# Storage
+storage:
+  db_path: "data/oracle.db"
+  checkpoint_dir: "checkpoints"
+  checkpoint_frequency: 100  # сохранять чекпоинт каждые N свечей
+  keep_checkpoints: 5  # хранить последние N чекпоинтов
+
+# Logging
+logging:
+  level: "INFO"
+  structured: true
+  log_file: "logs/oracle.log"
+  metrics_file: "logs/metrics.jsonl"
+
+# Bybit API
+bybit:
+  spot_ws_url: "wss://stream.bybit.com/v5/public/spot"
+  spot_rest_url: "https://api.bybit.com/v5/market"
+  reconnect_delay: 5
+  max_reconnect_attempts: 10
+  request_timeout: 10
+

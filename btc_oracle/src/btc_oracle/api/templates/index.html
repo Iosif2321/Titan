@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BTC Oracle Dashboard</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        body { background-color: #f8f9fa; }
+        .card { border: none; box-shadow: 0 4px 6px rgba(0,0,0,0.1); margin-bottom: 20px; transition: transform 0.2s; }
+        .card:hover { transform: translateY(-2px); }
+        .prediction-card { min-height: 200px; }
+        .label-UP { color: #198754; }
+        .label-DOWN { color: #dc3545; }
+        .label-FLAT { color: #6c757d; }
+        .label-UNCERTAIN { color: #fd7e14; }
+        .badge-confidence { font-size: 0.9em; }
+        .metric-value { font-size: 1.5rem; font-weight: bold; }
+        .metric-label { font-size: 0.8rem; color: #6c757d; text-transform: uppercase; letter-spacing: 1px; }
+        .refresh-spinner { display: inline-block; width: 1rem; height: 1rem; border: 0.2em solid currentColor; border-right-color: transparent; border-radius: 50%; animation: spinner-border .75s linear infinite; }
+        @keyframes spinner-border { 100% { transform: rotate(360deg); } }
+        .hidden { display: none; }
+        .probs-bar { height: 8px; border-radius: 4px; overflow: hidden; background: #e9ecef; margin-top: 5px; }
+        .probs-fill { height: 100%; transition: width 0.5s ease; }
+    </style>
+</head>
+<body>
+    <nav class="navbar navbar-dark bg-dark mb-4">
+        <div class="container-fluid">
+            <span class="navbar-brand mb-0 h1"><i class="fas fa-brain me-2"></i>BTCUSDT Oracle</span>
+            <span class="text-light" id="connection-status"><span class="badge bg-success">Connected</span></span>
+        </div>
+    </nav>
+
+    <div class="container">
+        <!-- Top Status Bar -->
+        <div class="row mb-4">
+            <div class="col-md-12">
+                <div class="d-flex justify-content-between align-items-center">
+                    <h5 class="text-muted mb-0">Last Updated: <span id="last-updated">--:--:--</span></h5>
+                    <div class="form-check form-switch">
+                        <input class="form-check-input" type="checkbox" id="autoRefresh" checked>
+                        <label class="form-check-label" for="autoRefresh">Auto-refresh (1s)</label>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Main Prediction Cards -->
+        <div class="row" id="predictions-container">
+            <!-- Dynamic content will be loaded here -->
+            <div class="col-12 text-center p-5">
+                <div class="spinner-border text-primary" role="status">
+                    <span class="visually-hidden">Loading...</span>
+                </div>
+                <p class="mt-2 text-muted">Waiting for predictions...</p>
+            </div>
+        </div>
+
+        <!-- System Metrics -->
+        <div class="row mb-4">
+            <div class="col-12">
+                <h5 class="mb-3 border-bottom pb-2">System Health</h5>
+            </div>
+            <div class="col-md-3">
+                <div class="card p-3">
+                    <div class="metric-label">Latency (Last)</div>
+                    <div class="metric-value" id="metric-latency">-- ms</div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card p-3">
+                    <div class="metric-label">Memory Coverage</div>
+                    <div class="metric-value" id="metric-memory">--%</div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card p-3">
+                    <div class="metric-label">Ensemble Consensus</div>
+                    <div class="metric-value" id="metric-consensus">--</div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card p-3">
+                    <div class="metric-label">Uncertainty Score</div>
+                    <div class="metric-value" id="metric-uncertainty">--</div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Raw Data Toggle -->
+        <div class="row mb-5">
+            <div class="col-12">
+                <button class="btn btn-outline-secondary btn-sm" type="button" data-bs-toggle="collapse" data-bs-target="#rawJson" aria-expanded="false">
+                    Show Raw JSON
+                </button>
+                <div class="collapse mt-2" id="rawJson">
+                    <div class="card card-body bg-light">
+                        <pre id="json-dump" style="font-size: 0.8rem; max-height: 300px; overflow: auto;"></pre>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Template for Horizon Card -->
+    <template id="horizon-card-template">
+        <div class="col-md-6 col-lg-3 mb-4">
+            <div class="card prediction-card h-100">
+                <div class="card-header d-flex justify-content-between align-items-center bg-white">
+                    <h6 class="mb-0 fw-bold"><i class="far fa-clock me-1"></i> <span class="horizon-min"></span> min</h6>
+                    <span class="badge bg-light text-dark border timestamp-badge">--:--:--</span>
+                </div>
+                <div class="card-body text-center d-flex flex-column justify-content-center">
+                    <h2 class="display-6 fw-bold mb-0 prediction-label">--</h2>
+                    <p class="text-muted reason-code small mb-3">--</p>
+                    
+                    <div class="w-100 text-start mt-auto">
+                        <div class="d-flex justify-content-between small text-muted mb-1">
+                            <span>UP</span>
+                            <span class="prob-up">0%</span>
+                        </div>
+                        <div class="probs-bar mb-2">
+                            <div class="probs-fill bg-success prob-fill-up" style="width: 0%"></div>
+                        </div>
+                        
+                        <div class="d-flex justify-content-between small text-muted mb-1">
+                            <span>DOWN</span>
+                            <span class="prob-down">0%</span>
+                        </div>
+                        <div class="probs-bar mb-2">
+                            <div class="probs-fill bg-danger prob-fill-down" style="width: 0%"></div>
+                        </div>
+
+                        <div class="d-flex justify-content-between small text-muted mb-1">
+                            <span>FLAT</span>
+                            <span class="prob-flat">0%</span>
+                        </div>
+                        <div class="probs-bar">
+                            <div class="probs-fill bg-secondary prob-fill-flat" style="width: 0%"></div>
+                        </div>
+                    </div>
+                </div>
+                <div class="card-footer bg-light text-muted small d-flex justify-content-between">
+                    <span title="Consensus"><i class="fas fa-users me-1"></i><span class="consensus-val">--</span></span>
+                    <span title="Pattern Memory"><i class="fas fa-history me-1"></i><span class="memory-val">--</span></span>
+                </div>
+            </div>
+        </div>
+    </template>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        const API_URL = '/predictions/latest';
+        const AUTO_REFRESH_INTERVAL = 1000;
+        let refreshTimer = null;
+
+        function formatTime(isoString) {
+            if (!isoString) return '--:--:--';
+            return new Date(isoString).toLocaleTimeString();
+        }
+
+        function updateCard(template, data, horizon) {
+            const clone = template.content.cloneNode(true);
+            const card = clone.querySelector('.card');
+            
+            // Basic Info
+            clone.querySelector('.horizon-min').textContent = horizon.replace('min', '');
+            clone.querySelector('.timestamp-badge').textContent = formatTime(data.ts);
+            
+            // Label and Styling
+            const labelEl = clone.querySelector('.prediction-label');
+            labelEl.textContent = data.label;
+            labelEl.classList.add('label-' + data.label);
+            
+            // Reason
+            clone.querySelector('.reason-code').textContent = data.reason_code;
+            
+            // Probabilities
+            const pUp = (data.p_up * 100).toFixed(1);
+            const pDown = (data.p_down * 100).toFixed(1);
+            const pFlat = (data.p_flat * 100).toFixed(1);
+            
+            clone.querySelector('.prob-up').textContent = pUp + '%';
+            clone.querySelector('.prob-fill-up').style.width = pUp + '%';
+            
+            clone.querySelector('.prob-down').textContent = pDown + '%';
+            clone.querySelector('.prob-fill-down').style.width = pDown + '%';
+            
+            clone.querySelector('.prob-flat').textContent = pFlat + '%';
+            clone.querySelector('.prob-fill-flat').style.width = pFlat + '%';
+            
+            // Footer Stats
+            clone.querySelector('.consensus-val').textContent = (data.consensus * 100).toFixed(0) + '%';
+            
+            const memVal = data.memory ? (data.memory.credibility * 100).toFixed(0) + '%' : 'N/A';
+            clone.querySelector('.memory-val').textContent = memVal;
+            
+            return clone;
+        }
+
+        async function fetchData() {
+            try {
+                const response = await fetch(API_URL);
+                if (!response.ok) throw new Error('Network response was not ok');
+                const data = await response.json();
+                
+                // Update timestamp
+                document.getElementById('last-updated').textContent = new Date().toLocaleTimeString();
+                document.getElementById('json-dump').textContent = JSON.stringify(data, null, 2);
+                
+                const container = document.getElementById('predictions-container');
+                container.innerHTML = ''; // Clear current
+                
+                const template = document.getElementById('horizon-card-template');
+                
+                // Sort horizons: 1min, 5min, 15min, 60min
+                const horizonOrder = ['1min', '5min', '15min', '60min'];
+                const sortedKeys = Object.keys(data).sort((a, b) => {
+                    return horizonOrder.indexOf(a) - horizonOrder.indexOf(b);
+                });
+
+                let totalLatency = 0;
+                let count = 0;
+                let maxUncertainty = 0;
+                let avgConsensus = 0;
+
+                sortedKeys.forEach(key => {
+                    const pred = data[key];
+                    container.appendChild(updateCard(template, pred, key));
+                    
+                    // Metrics aggregation
+                    totalLatency += pred.latency_ms;
+                    maxUncertainty = Math.max(maxUncertainty, pred.uncertainty_score);
+                    avgConsensus += pred.consensus;
+                    count++;
+                });
+
+                // Update System Metrics
+                if (count > 0) {
+                    document.getElementById('metric-latency').textContent = (totalLatency / count).toFixed(1) + ' ms';
+                    document.getElementById('metric-uncertainty').textContent = maxUncertainty.toFixed(2);
+                    document.getElementById('metric-consensus').textContent = (avgConsensus / count).toFixed(2);
+                    // Memory coverage placeholder
+                    document.getElementById('metric-memory').textContent = data['1min']?.memory ? 'Active' : 'Building';
+                }
+
+            } catch (error) {
+                console.error('Error fetching data:', error);
+                document.getElementById('connection-status').innerHTML = '<span class="badge bg-danger">Disconnected</span>';
+            }
+        }
+
+        // Auto Refresh Logic
+        const checkbox = document.getElementById('autoRefresh');
+        
+        function startTimer() {
+            if (refreshTimer) clearInterval(refreshTimer);
+            fetchData(); // Initial fetch
+            refreshTimer = setInterval(fetchData, AUTO_REFRESH_INTERVAL);
+        }
+
+        checkbox.addEventListener('change', (e) => {
+            if (e.target.checked) {
+                startTimer();
+            } else {
+                clearInterval(refreshTimer);
+            }
+        });
+
+        // Start immediately
+        startTimer();
+    </script>
+</body>
+</html>
+
