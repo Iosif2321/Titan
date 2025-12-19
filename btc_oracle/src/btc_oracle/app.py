@@ -25,6 +25,7 @@ from btc_oracle.fusion.policy import DecisionPolicy
 from btc_oracle.models.lstm import LSTMModel
 from btc_oracle.patterns.encoder import PatternEncoder
 from btc_oracle.patterns.store import PatternStore
+from btc_oracle.rewards.score import RewardScorer
 from btc_oracle.training.labels import compute_truth_label
 
 logger = get_logger(__name__)
@@ -87,6 +88,21 @@ class OracleApp:
             temperature=config.calibration.temperature_initial,
         )
         self.policy = DecisionPolicy(config)
+
+        bins_config = {
+            "tiny": config.rewards.bins.tiny,
+            "small": config.rewards.bins.small,
+            "medium": config.rewards.bins.medium,
+            "large": config.rewards.bins.large,
+            "extreme": config.rewards.bins.extreme,
+        }
+        self.reward_scorer = RewardScorer(
+            bins_config=bins_config,
+            confidence_penalty_alpha=config.rewards.confidence_penalty_alpha,
+            target_coverage=config.rewards.target_coverage,
+            uncertain_penalty_base=config.rewards.uncertain_penalty_base,
+            uncertain_penalty_large_move=config.rewards.uncertain_penalty_large_move,
+        )
     
     def _init_models(self):
         """Инициализировать модели ансамбля."""
@@ -142,8 +158,10 @@ class OracleApp:
         features.ts = candle_close_ts
         features.timeframe = self.config.timeframe
         
-        # Neural opinion
-        neural_opinion = await self.aggregator.aggregate(features, enable_dropout=True)
+        # Neural opinion + детали по моделям
+        fused_opinion, model_opinions, model_weights = await self.aggregator.aggregate_with_details(
+            features, enable_dropout=True
+        )
 
         horizons = sorted(self.config.horizons)
         last_decision: Optional[Decision] = None
@@ -156,7 +174,7 @@ class OracleApp:
                 features,
                 horizon=horizon,
                 timeframe=self.config.timeframe,
-                context=neural_opinion,
+                context=fused_opinion,
             )
             memory_opinion = self.pattern_store.get_opinion(
                 pattern_key,
@@ -165,7 +183,7 @@ class OracleApp:
             )
             
             # Fusion
-            fused = self.fusion_engine.fuse(neural_opinion, memory_opinion)
+            fused = self.fusion_engine.fuse(fused_opinion, memory_opinion)
             
             # Calibration
             if self.config.calibration.enabled:
@@ -181,8 +199,23 @@ class OracleApp:
                 latency_ms=latency_ms,
             )
             
-            # Сохраняем прогноз
-            self.store.add_prediction(decision)
+            # Сохраняем прогноз и индивидуальные мнения моделей
+            per_model_payload = [
+                {
+                    "model_id": f"model_{idx}",
+                    "p_up": op.p_up,
+                    "p_down": op.p_down,
+                    "p_flat": op.p_flat,
+                    "u_dir": op.u_dir,
+                    "u_mag": op.u_mag,
+                }
+                for idx, op in enumerate(model_opinions)
+            ]
+            self.store.add_prediction(
+                decision,
+                model_opinions=per_model_payload,
+                model_weights=model_weights,
+            )
             last_decision = decision
             
             logger.info(
@@ -234,15 +267,70 @@ class OracleApp:
                         m_flat_threshold=self.config.flat.m_flat,
                     )
                     
-                    # Обновляем прогноз
-                    reward = 0.0  # будет вычисляться в rewards
+                    from btc_oracle.core.types import Decision, FusedForecast
+
+                    agg_decision = Decision(
+                        label=Label(pred_data["label"]),
+                        reason_code=pred_data["reason_code"],  # type: ignore
+                        ts=forecast_ts,
+                        symbol=pred_data["symbol"],
+                        horizon_min=horizon,
+                        p_up=pred_data["p_up"],
+                        p_down=pred_data["p_down"],
+                        p_flat=pred_data["p_flat"],
+                        flat_score=pred_data["flat_score"],
+                        uncertainty_score=pred_data["uncertainty_score"],
+                        consensus=pred_data["consensus"],
+                    )
+                    reward = self.reward_scorer.compute_reward(
+                        decision=agg_decision,
+                        truth=truth,
+                        magnitude=magnitude,
+                    )
+
+                    model_rewards: list[float] = []
+                    if pred_data.get("model_opinions"):
+                        for idx, model_payload in enumerate(pred_data["model_opinions"]):
+                            single_forecast = FusedForecast(
+                                p_up=model_payload["p_up"],
+                                p_down=model_payload["p_down"],
+                                p_flat=model_payload["p_flat"],
+                                u_dir=model_payload["u_dir"],
+                                u_mag=model_payload["u_mag"],
+                                flat_score=model_payload["p_flat"],
+                                uncertainty_score=model_payload["u_dir"],
+                                consensus=pred_data.get("model_weights", [1.0])[idx]
+                                if pred_data.get("model_weights")
+                                else pred_data["consensus"],
+                                memory_support=None,
+                            )
+                            single_decision = self.policy.decide(
+                                forecast=single_forecast,
+                                symbol=self.config.symbol,
+                                horizon_min=horizon,
+                                ts=forecast_ts,
+                                latency_ms=pred_data["latency_ms"],
+                            )
+                            model_reward = self.reward_scorer.compute_reward(
+                                decision=single_decision,
+                                truth=truth,
+                                magnitude=magnitude,
+                                model_id=model_payload["model_id"],
+                                horizon=horizon,
+                            )
+                            model_rewards.append(model_reward)
+
+                        if model_rewards:
+                            self.weight_manager.update_weights(model_rewards)
+
                     self.store.mark_prediction_matured(
                         ts=pred_data["ts"],
                         symbol=self.config.symbol,
                         horizon_min=horizon,
-                        truth_label=truth,
+                        truth_label=truth.value,
                         truth_magnitude=magnitude,
                         reward=reward,
+                        model_rewards=model_rewards if model_rewards else None,
                     )
     
     async def run_live(self):
