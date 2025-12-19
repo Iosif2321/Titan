@@ -102,10 +102,11 @@ class ModelWrapper:
         if np.isnan(p_down_mean): p_down_mean = 0.5
         if np.isnan(p_flat_mean): p_flat_mean = 0.5
         
-        # Для ансамбля consensus/disagreement будут вычисляться в aggregator
-        # Здесь возвращаем placeholder
-        consensus = 1.0 - u_dir  # упрощённо
-        disagreement = u_dir
+        # Базовый consensus задаём через дисперсию вероятностей,
+        # чтобы агрегатор мог усиливать/ослаблять уверенность адекватно.
+        prob_std = float(np.std(p_up_samples + p_down_samples + p_flat_samples))
+        consensus = max(0.0, 1.0 - prob_std)
+        disagreement = prob_std
         
         latency_ms = (time.time() - start_time) * 1000
         

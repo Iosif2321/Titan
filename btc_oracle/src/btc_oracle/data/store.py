@@ -67,8 +67,13 @@ class DataStore:
                 return candle
         return None
 
-    def add_prediction(self, decision: Decision) -> None:
-        """Сохранить прогноз."""
+    def add_prediction(
+        self,
+        decision: Decision,
+        model_opinions: Optional[list[dict]] = None,
+        model_weights: Optional[list[float]] = None,
+    ) -> None:
+        """Сохранить прогноз вместе с мнениями отдельных моделей."""
         record = {
             "ts": int(decision.ts.timestamp() * 1000),
             "symbol": decision.symbol,
@@ -87,6 +92,9 @@ class DataStore:
             "truth_label": None,
             "truth_magnitude": None,
             "reward": None,
+            "model_opinions": model_opinions or [],
+            "model_weights": model_weights or [],
+            "model_rewards": None,
         }
         self._predictions[(decision.symbol, decision.horizon_min)].append(record)
 
@@ -119,6 +127,7 @@ class DataStore:
         truth_label: str,
         truth_magnitude: float,
         reward: float,
+        model_rewards: Optional[list[float]] = None,
     ) -> None:
         """Отметить прогноз как созревший."""
         for pred in self._predictions.get((symbol, horizon_min), []):
@@ -126,5 +135,6 @@ class DataStore:
                 pred["truth_label"] = truth_label
                 pred["truth_magnitude"] = truth_magnitude
                 pred["reward"] = reward
+                pred["model_rewards"] = model_rewards
                 pred["matured_at"] = int(datetime.now().timestamp() * 1000)
                 return
