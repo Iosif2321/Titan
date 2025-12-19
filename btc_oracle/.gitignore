@@ -35,9 +35,13 @@ ENV/
 # Data and logs
 data/
 logs/
+artifacts/
+state/
 *.db
 *.sqlite
 *.parquet
+*.lmdb
+*.mdb
 
 # Checkpoints
 checkpoints/

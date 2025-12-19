@@ -17,6 +17,8 @@ from btc_oracle.features.normalizer import OnlineNormalizer
 
 
 class FeaturePipeline:
+    VOLUME_PROFILE_BINS = 5
+
     """Пайплайн для построения признаков."""
     
     def __init__(self, window_size: int = 100, normalize: bool = True):
@@ -91,7 +93,7 @@ class FeaturePipeline:
             features_list.extend([0.0, 0.5])
         
         # Volume Profile (упрощённо - последние N свечей)
-        vol_profile = calculate_volume_profile(volumes[-20:], highs[-20:], lows[-20:], bins=5)
+        vol_profile = calculate_volume_profile(volumes[-20:], highs[-20:], lows[-20:], bins=self.VOLUME_PROFILE_BINS)
         features_list.extend(vol_profile.tolist())
         
         # Price features (статистики доходности)
@@ -149,6 +151,32 @@ class FeaturePipeline:
             meta=meta,
         )
     
+    @classmethod
+    def feature_names(cls) -> list[str]:
+        """Poryadok priznakov, podavaemykh v model."""
+        names = [
+            'atr',
+            'atr_norm',
+            'rsi',
+            'macd',
+            'macd_signal',
+            'macd_hist',
+            'bb_width',
+            'bb_position',
+        ]
+        names.extend([f'vol_profile_{i}' for i in range(cls.VOLUME_PROFILE_BINS)])
+        names.extend([
+            'returns_mean',
+            'returns_std',
+            'returns_skew',
+            'returns_kurt',
+            'return_1',
+            'return_5',
+            'vol_ratio',
+            'hl_spread',
+        ])
+        return names
+
     def update_normalizer(self, feature_vector: np.ndarray) -> None:
         """Обновить нормализатор одним примером."""
         if self.normalizer:

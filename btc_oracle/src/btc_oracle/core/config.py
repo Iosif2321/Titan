@@ -32,8 +32,9 @@ class UncertaintyConfig(BaseModel):
 
 
 class DecisionConfig(BaseModel):
-    """Конфигурация решений."""
+    """Decision configuration."""
     dir_p_thr: float = 0.55
+    dir_gap_min: float = 0.02
 
 
 class EnsembleConfig(BaseModel):
@@ -44,9 +45,50 @@ class EnsembleConfig(BaseModel):
     uncertainty_penalty_lambda: float = 0.3
 
 
+class PatternStorageConfig(BaseModel):
+    """Конфигурация хранилища паттернов."""
+    lmdb_path: str = "artifacts/patterns/patterns.lmdb"
+    log_dir: str = "artifacts/patterns/logs"
+    disk_cap_gb: float = 5.0
+
+
+class PatternHashConfig(BaseModel):
+    """Конфигурация хеширования паттернов."""
+    type: str = "simhash"
+    bits: int = 256
+    bands: int = 8
+    band_bits: int = 32
+    dual_hash: bool = True
+    seed: int = 1337
+
+
+class PatternSearchConfig(BaseModel):
+    """Конфигурация поиска паттернов."""
+    similarity_min: float = 0.90
+    adaptive_step: float = 0.02
+    target_candidates_min: int = 20
+    target_candidates_max: int = 50
+    full_vector_metric: str = "cosine"
+    regime_filter: bool = True
+
+
+class PatternLimitsConfig(BaseModel):
+    """Лимиты паттернов."""
+    ring_buffer: int = 10000
+    aggregates_max: int = 1000000
+    extremes_max: int = 1000
+
+
+class PatternCullingConfig(BaseModel):
+    """Конфигурация отсева паттернов."""
+    n_min: int = 500
+    p0_scope: str = "tf+regime"
+    delta: float = 0.02
+    contrarian: bool = True
+
+
 class PatternsConfig(BaseModel):
     """Конфигурация памяти паттернов."""
-    discretization_bins: int = 20
     beta_prior_alpha: float = 1.0
     beta_prior_beta: float = 1.0
     beta_prior_alpha_flat: float = 1.0
@@ -55,6 +97,12 @@ class PatternsConfig(BaseModel):
     cooldown_errors_threshold: int = 5
     cooldown_duration_hours: float = 24
     min_pattern_samples: int = 3
+
+    storage: PatternStorageConfig = PatternStorageConfig()
+    hash: PatternHashConfig = PatternHashConfig()
+    search: PatternSearchConfig = PatternSearchConfig()
+    limits: PatternLimitsConfig = PatternLimitsConfig()
+    culling: PatternCullingConfig = PatternCullingConfig()
 
 
 class FusionConfig(BaseModel):
@@ -177,7 +225,7 @@ class Config:
     """Главная конфигурация системы."""
     symbol: str = "BTCUSDT"
     timeframe: str = "1m"
-    horizons: list[int] = field(default_factory=lambda: [1, 5, 15, 60])
+    horizons: list[int] = field(default_factory=lambda: [1, 5, 10, 15, 30, 60])
     
     performance: PerformanceConfig = field(default_factory=PerformanceConfig)
     flat: FlatConfig = field(default_factory=FlatConfig)
@@ -203,7 +251,7 @@ class Config:
         config = cls(
             symbol=data.get("symbol", "BTCUSDT"),
             timeframe=data.get("timeframe", "1m"),
-            horizons=data.get("horizons", [1, 5, 15, 60]),
+            horizons=data.get("horizons", [1, 5, 10, 15, 30, 60]),
         )
         
         # Загружаем вложенные конфигурации

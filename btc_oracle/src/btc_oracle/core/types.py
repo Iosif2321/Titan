@@ -24,6 +24,7 @@ class ReasonCode(str, Enum):
     MEMORY_VS_NEURAL_CONFLICT = "MEMORY_VS_NEURAL_CONFLICT"
     INSUFFICIENT_PATTERN_SUPPORT = "INSUFFICIENT_PATTERN_SUPPORT"
     STRONG_DIRECTIONAL_SIGNAL = "STRONG_DIRECTIONAL_SIGNAL"
+    WEAK_DIRECTIONAL_SIGNAL = "WEAK_DIRECTIONAL_SIGNAL"
     MEMORY_HIGH_CONFIDENCE = "MEMORY_HIGH_CONFIDENCE"
 
 
@@ -63,7 +64,10 @@ class PatternKey:
     """Ключ паттерна."""
     timeframe: str
     horizon: int  # в минутах
-    pattern_id: int  # uint64 hash
+    pattern_id: int  # 128-bit internal id (int)
+    market_hash: bytes  # 256-bit SimHash
+    context_hash: bytes  # 256-bit SimHash
+    regime_key: int  # compact regime id
 
 
 @dataclass

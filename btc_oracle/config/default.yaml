@@ -8,7 +8,9 @@ timeframe: "1m"  # базовый таймфрейм свечей
 horizons:
   - 1
   - 5
+  - 10
   - 15
+  - 30
   - 60
 
 # Лимиты производительности
@@ -34,6 +36,7 @@ uncertainty:
 # Пороги для Direction (UP/DOWN)
 decision:
   dir_p_thr: 0.55  # минимум вероятности для направления
+  dir_gap_min: 0.02  # минимальный разрыв между UP/DOWN для мягкого выбора направления
 
 # Ансамбль моделей
 ensemble:
@@ -42,17 +45,49 @@ ensemble:
   ema_alpha: 0.1  # коэффициент EMA для весов моделей
   uncertainty_penalty_lambda: 0.3  # штраф за uncertainty в effective weight
 
+
 # Pattern Memory
 patterns:
-  discretization_bins: 20  # количество бинов для дискретизации признаков
-  beta_prior_alpha: 1.0  # prior для Beta распределения (direction)
+  beta_prior_alpha: 1.0
   beta_prior_beta: 1.0
-  beta_prior_alpha_flat: 1.0  # prior для Beta распределения (flat)
+  beta_prior_alpha_flat: 1.0
   beta_prior_beta_flat: 1.0
-  decay_half_life_hours: 168  # период полураспада (7 дней)
-  cooldown_errors_threshold: 5  # количество ошибок для cooldown
+  decay_half_life_hours: 168
+  cooldown_errors_threshold: 5
   cooldown_duration_hours: 24
-  min_pattern_samples: 3  # минимум примеров для доверия паттерну
+  min_pattern_samples: 3
+
+  storage:
+    lmdb_path: "artifacts/patterns/patterns.lmdb"
+    log_dir: "artifacts/patterns/logs"
+    disk_cap_gb: 5
+
+  hash:
+    type: "simhash"
+    bits: 256
+    bands: 8
+    band_bits: 32
+    dual_hash: true
+    seed: 1337
+
+  search:
+    similarity_min: 0.9
+    adaptive_step: 0.02
+    target_candidates_min: 20
+    target_candidates_max: 50
+    full_vector_metric: "cosine"
+    regime_filter: true
+
+  limits:
+    ring_buffer: 10000
+    aggregates_max: 1000000
+    extremes_max: 1000
+
+  culling:
+    n_min: 500
+    p0_scope: "tf+regime"
+    delta: 0.02
+    contrarian: true
 
 # Fusion (Neural + Memory)
 fusion:

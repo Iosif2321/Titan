@@ -11,6 +11,7 @@ import torch
 from btc_oracle.core.config import Config, load_config
 from btc_oracle.core.log import get_logger, setup_logging
 from btc_oracle.core.types import Candle, Decision, Features, Label
+from btc_oracle.core.timeframes import candle_close_time, timeframe_to_minutes
 from btc_oracle.data.bybit_spot import BybitSpotClient
 from btc_oracle.data.repository import DataRepository
 from btc_oracle.data.store import DataStore
@@ -29,6 +30,17 @@ from btc_oracle.training.labels import compute_truth_label
 logger = get_logger(__name__)
 
 
+def _is_horizon_tick(ts: datetime, horizon_min: int) -> bool:
+    if ts.second != 0 or ts.microsecond != 0:
+        return False
+    if horizon_min <= 1:
+        return True
+    minute = ts.minute
+    if horizon_min >= 60:
+        return minute == 0
+    return minute % int(horizon_min) == 0
+
+
 class OracleApp:
     """Главное приложение системы прогнозирования."""
     
@@ -42,12 +54,10 @@ class OracleApp:
         # Инициализация компонентов
         self.store = DataStore(Path(config.storage.db_path))
         self.repository = DataRepository(self.store)
-        self.pattern_store = PatternStore(
-            Path(config.storage.db_path),
-            discretization_bins=config.patterns.discretization_bins,
-        )
-        self.pattern_encoder = PatternEncoder(bins=config.patterns.discretization_bins)
+        self.pattern_store = PatternStore(config.patterns)
+        self.pattern_encoder = PatternEncoder(config.patterns)
         self.feature_pipeline = FeaturePipeline(window_size=100)
+        self.base_tf_min = timeframe_to_minutes(config.timeframe)
         
         # Модели ансамбля
         self.models = []
@@ -80,8 +90,7 @@ class OracleApp:
     
     def _init_models(self):
         """Инициализировать модели ансамбля."""
-        # Определяем размерность признаков (примерно)
-        feature_dim = 30  # из pipeline
+        feature_dim = len(self.feature_pipeline.feature_names())
         
         for i in range(self.config.ensemble.num_models):
             model = LSTMModel(
@@ -111,6 +120,8 @@ class OracleApp:
             Decision или None если недостаточно данных
         """
         start_time = time.time()
+        candle_open_ts = candle.ts.replace(second=0, microsecond=0)
+        candle_close_ts = candle_close_time(candle_open_ts, self.base_tf_min)
         
         # Сохраняем свечу
         self.store.add_candle(candle, self.config.symbol, self.config.timeframe)
@@ -128,52 +139,61 @@ class OracleApp:
         
         # Строим признаки
         features = self.feature_pipeline.build_features(feature_window)
+        features.ts = candle_close_ts
+        features.timeframe = self.config.timeframe
         
-        # Параллельно получаем мнения Neural и Memory
-        neural_task = self.aggregator.aggregate(features, enable_dropout=True)
+        # Neural opinion
+        neural_opinion = await self.aggregator.aggregate(features, enable_dropout=True)
+
+        horizons = sorted(self.config.horizons)
+        last_decision: Optional[Decision] = None
         
-        # Memory opinion
-        pattern_key = self.pattern_encoder.encode(
-            features,
-            horizon=self.config.horizons[0],  # для первого горизонта
-            timeframe=self.config.timeframe,
-        )
-        memory_opinion = self.pattern_store.get_opinion(
-            pattern_key,
-            min_samples=self.config.patterns.min_pattern_samples,
-        )
+        for horizon in horizons:
+            if not _is_horizon_tick(candle_close_ts, horizon):
+                continue
+
+            pattern_key = self.pattern_encoder.encode(
+                features,
+                horizon=horizon,
+                timeframe=self.config.timeframe,
+                context=neural_opinion,
+            )
+            memory_opinion = self.pattern_store.get_opinion(
+                pattern_key,
+                min_samples=self.config.patterns.min_pattern_samples,
+                features=features,
+            )
+            
+            # Fusion
+            fused = self.fusion_engine.fuse(neural_opinion, memory_opinion)
+            
+            # Calibration
+            if self.config.calibration.enabled:
+                fused = self.calibrator.calibrate(fused)
+            
+            # Policy
+            latency_ms = (time.time() - start_time) * 1000
+            decision = self.policy.decide(
+                forecast=fused,
+                symbol=self.config.symbol,
+                horizon_min=horizon,
+                ts=candle_close_ts,
+                latency_ms=latency_ms,
+            )
+            
+            # Сохраняем прогноз
+            self.store.add_prediction(decision)
+            last_decision = decision
+            
+            logger.info(
+                "Prediction made",
+                label=decision.label.value,
+                reason=decision.reason_code.value,
+                latency_ms=latency_ms,
+                horizon=horizon,
+            )
         
-        # Ждём neural
-        neural_opinion = await neural_task
-        
-        # Fusion
-        fused = self.fusion_engine.fuse(neural_opinion, memory_opinion)
-        
-        # Calibration
-        if self.config.calibration.enabled:
-            fused = self.calibrator.calibrate(fused)
-        
-        # Policy
-        latency_ms = (time.time() - start_time) * 1000
-        decision = self.policy.decide(
-            forecast=fused,
-            symbol=self.config.symbol,
-            horizon_min=self.config.horizons[0],
-            ts=candle.ts,
-            latency_ms=latency_ms,
-        )
-        
-        # Сохраняем прогноз
-        self.store.add_prediction(decision)
-        
-        logger.info(
-            "Prediction made",
-            label=decision.label.value,
-            reason=decision.reason_code.value,
-            latency_ms=latency_ms,
-        )
-        
-        return decision
+        return last_decision
     
     async def process_matured_predictions(self):
         """Обработать созревшие прогнозы."""

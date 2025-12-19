@@ -28,8 +28,17 @@
 <body>
     <nav class="navbar navbar-dark bg-dark mb-4">
         <div class="container-fluid">
-            <span class="navbar-brand mb-0 h1"><i class="fas fa-brain me-2"></i>BTCUSDT Oracle</span>
-            <span class="text-light" id="connection-status"><span class="badge bg-success">Connected</span></span>
+            <span class="navbar-brand mb-0 h1"><i class="fas fa-brain me-2"></i><span data-i18n="brand">BTCUSDT Oracle</span></span>
+            <div class="d-flex align-items-center gap-2">
+                <a class="btn btn-outline-light btn-sm" href="/models" data-i18n="nav_models">Models</a>
+                <a class="btn btn-outline-light btn-sm" href="/inputs" data-i18n="nav_inputs">Inputs</a>
+                <a class="btn btn-outline-light btn-sm" href="/patterns" data-i18n="nav_patterns">Patterns</a>
+                <select class="form-select form-select-sm bg-dark text-light border-secondary" id="lang-select" aria-label="Language" style="width: 86px;">
+                    <option value="en">EN</option>
+                    <option value="ru">RU</option>
+                </select>
+                <span class="text-light" id="connection-status"><span class="badge bg-success" data-i18n="status_connected">Connected</span></span>
+            </div>
         </div>
     </nav>
 
@@ -38,10 +47,10 @@
         <div class="row mb-4">
             <div class="col-md-12">
                 <div class="d-flex justify-content-between align-items-center">
-                    <h5 class="text-muted mb-0">Last Updated: <span id="last-updated">--:--:--</span></h5>
+                    <h5 class="text-muted mb-0"><span data-i18n="last_updated">Last Updated</span>: <span id="last-updated">--:--:--</span> <small class="text-muted">(<span data-i18n="local">local</span>)</small></h5>
                     <div class="form-check form-switch">
                         <input class="form-check-input" type="checkbox" id="autoRefresh" checked>
-                        <label class="form-check-label" for="autoRefresh">Auto-refresh (1s)</label>
+                        <label class="form-check-label" for="autoRefresh" data-i18n="auto_refresh">Auto-refresh (1s)</label>
                     </div>
                 </div>
             </div>
@@ -52,39 +61,122 @@
             <!-- Dynamic content will be loaded here -->
             <div class="col-12 text-center p-5">
                 <div class="spinner-border text-primary" role="status">
-                    <span class="visually-hidden">Loading...</span>
+                    <span class="visually-hidden" data-i18n="loading">Loading...</span>
                 </div>
-                <p class="mt-2 text-muted">Waiting for predictions...</p>
+                <p class="mt-2 text-muted" data-i18n="waiting_predictions">Waiting for predictions...</p>
             </div>
         </div>
 
         <!-- System Metrics -->
         <div class="row mb-4">
             <div class="col-12">
-                <h5 class="mb-3 border-bottom pb-2">System Health</h5>
+                <h5 class="mb-3 border-bottom pb-2" data-i18n="system_health">System Health</h5>
             </div>
             <div class="col-md-3">
                 <div class="card p-3">
-                    <div class="metric-label">Latency (Last)</div>
+                    <div class="metric-label" data-i18n="metric_latency">Latency (Last)</div>
                     <div class="metric-value" id="metric-latency">-- ms</div>
                 </div>
             </div>
             <div class="col-md-3">
                 <div class="card p-3">
-                    <div class="metric-label">Memory Coverage</div>
+                    <div class="metric-label" data-i18n="metric_memory">Memory Coverage</div>
                     <div class="metric-value" id="metric-memory">--%</div>
                 </div>
             </div>
             <div class="col-md-3">
                 <div class="card p-3">
-                    <div class="metric-label">Ensemble Consensus</div>
+                    <div class="metric-label" data-i18n="metric_consensus">Ensemble Consensus</div>
                     <div class="metric-value" id="metric-consensus">--</div>
                 </div>
             </div>
             <div class="col-md-3">
                 <div class="card p-3">
-                    <div class="metric-label">Uncertainty Score</div>
+                    <div class="metric-label" data-i18n="metric_uncertainty">Uncertainty Score</div>
                     <div class="metric-value" id="metric-uncertainty">--</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Forecast Metrics -->
+        <div class="row mb-4">
+            <div class="col-12">
+                <h5 class="mb-3 border-bottom pb-2" data-i18n="forecast_performance">Forecast Performance</h5>
+            </div>
+            <div class="col-md-3">
+                <div class="card p-3">
+                    <div class="metric-label" data-i18n="metric_accuracy">Accuracy</div>
+                    <div class="metric-value" id="metric-accuracy">--%</div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card p-3">
+                    <div class="metric-label" data-i18n="metric_dir_accuracy">Directional Accuracy</div>
+                    <div class="metric-value" id="metric-dir-accuracy">--%</div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card p-3">
+                    <div class="metric-label" data-i18n="metric_coverage">Coverage</div>
+                    <div class="metric-value" id="metric-coverage">--%</div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card p-3">
+                    <div class="metric-label" data-i18n="metric_confidence">Avg Confidence</div>
+                    <div class="metric-value" id="metric-confidence">--%</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Pattern Memory -->
+        <div class="row mb-4">
+            <div class="col-12">
+                <h5 class="mb-3 border-bottom pb-2" data-i18n="pattern_memory">Pattern Memory</h5>
+            </div>
+            <div class="col-md-3">
+                <div class="card p-3">
+                    <div class="metric-label" data-i18n="metric_patterns_total">Total Patterns</div>
+                    <div class="metric-value" id="metric-patterns-total">--</div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card p-3">
+                    <div class="metric-label" data-i18n="metric_patterns_active">Active Patterns</div>
+                    <div class="metric-value" id="metric-patterns-active">--</div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card p-3">
+                    <div class="metric-label" data-i18n="metric_patterns_contrarian">Contrarian</div>
+                    <div class="metric-value" id="metric-patterns-contrarian">--</div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card p-3">
+                    <div class="metric-label" data-i18n="metric_patterns_samples">Total Samples</div>
+                    <div class="metric-value" id="metric-patterns-samples">--</div>
+                </div>
+            </div>
+            <div class="col-12 mt-3">
+                <div class="card p-3">
+                    <div class="metric-label mb-2" data-i18n="top_patterns">Top Patterns</div>
+                    <div class="table-responsive">
+                        <table class="table table-sm align-middle mb-0">
+                            <thead>
+                                <tr>
+                                    <th scope="col" data-i18n="table_pattern">Pattern</th>
+                                    <th scope="col" data-i18n="table_tf">TF</th>
+                                    <th scope="col" data-i18n="table_n">N</th>
+                                    <th scope="col" data-i18n="table_cred">Cred</th>
+                                    <th scope="col" data-i18n="table_diracc">DirAcc</th>
+                                    <th scope="col" data-i18n="table_probs">P(UP/DOWN)</th>
+                                    <th scope="col" data-i18n="table_status">Status</th>
+                                </tr>
+                            </thead>
+                            <tbody id="patterns-table-body"></tbody>
+                        </table>
+                    </div>
                 </div>
             </div>
         </div>
@@ -92,7 +184,7 @@
         <!-- Raw Data Toggle -->
         <div class="row mb-5">
             <div class="col-12">
-                <button class="btn btn-outline-secondary btn-sm" type="button" data-bs-toggle="collapse" data-bs-target="#rawJson" aria-expanded="false">
+                <button class="btn btn-outline-secondary btn-sm" type="button" data-bs-toggle="collapse" data-bs-target="#rawJson" aria-expanded="false" data-i18n="show_raw_json">
                     Show Raw JSON
                 </button>
                 <div class="collapse mt-2" id="rawJson">
@@ -109,16 +201,21 @@
         <div class="col-md-6 col-lg-3 mb-4">
             <div class="card prediction-card h-100">
                 <div class="card-header d-flex justify-content-between align-items-center bg-white">
-                    <h6 class="mb-0 fw-bold"><i class="far fa-clock me-1"></i> <span class="horizon-min"></span> min</h6>
+                    <h6 class="mb-0 fw-bold"><i class="far fa-clock me-1"></i> <span class="horizon-min"></span> <span data-i18n="unit_min">min</span></h6>
                     <span class="badge bg-light text-dark border timestamp-badge">--:--:--</span>
                 </div>
                 <div class="card-body text-center d-flex flex-column justify-content-center">
                     <h2 class="display-6 fw-bold mb-0 prediction-label">--</h2>
-                    <p class="text-muted reason-code small mb-3">--</p>
+                    <p class="text-muted reason-code small mb-1">--</p>
+                    <div class="small text-muted mb-3">
+                        <span data-i18n="price_pred">Price @ pred</span>: <span class="price-pred">--</span>
+                        <span class="mx-2">|</span>
+                        <span data-i18n="price_fact">Price @ fact</span>: <span class="price-fact">--</span>
+                    </div>
                     
                     <div class="w-100 text-start mt-auto">
                         <div class="d-flex justify-content-between small text-muted mb-1">
-                            <span>UP</span>
+                            <span class="label-up-text" data-i18n="label_up">UP</span>
                             <span class="prob-up">0%</span>
                         </div>
                         <div class="probs-bar mb-2">
@@ -126,7 +223,7 @@
                         </div>
                         
                         <div class="d-flex justify-content-between small text-muted mb-1">
-                            <span>DOWN</span>
+                            <span class="label-down-text" data-i18n="label_down">DOWN</span>
                             <span class="prob-down">0%</span>
                         </div>
                         <div class="probs-bar mb-2">
@@ -134,7 +231,7 @@
                         </div>
 
                         <div class="d-flex justify-content-between small text-muted mb-1">
-                            <span>FLAT</span>
+                            <span class="label-flat-text" data-i18n="label_flat">FLAT</span>
                             <span class="prob-flat">0%</span>
                         </div>
                         <div class="probs-bar">
@@ -143,8 +240,8 @@
                     </div>
                 </div>
                 <div class="card-footer bg-light text-muted small d-flex justify-content-between">
-                    <span title="Consensus"><i class="fas fa-users me-1"></i><span class="consensus-val">--</span></span>
-                    <span title="Pattern Memory"><i class="fas fa-history me-1"></i><span class="memory-val">--</span></span>
+                    <span title="Consensus" data-i18n-title="footer_consensus"><i class="fas fa-users me-1"></i><span data-i18n="footer_consensus">Consensus</span>: <span class="consensus-val">--</span></span>
+                    <span title="Pattern Memory" data-i18n-title="footer_memory"><i class="fas fa-history me-1"></i><span data-i18n="footer_memory">Memory</span>: <span class="memory-val">--</span></span>
                 </div>
             </div>
         </div>
@@ -152,13 +249,196 @@
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script>
+        const LANG_KEY = 'titan_ui_lang';
+        const I18N = {
+            en: {
+                title: 'BTC Oracle Dashboard',
+                brand: 'BTCUSDT Oracle',
+                nav_models: 'Models',
+                nav_inputs: 'Inputs',
+                nav_patterns: 'Patterns',
+                status_connected: 'Connected',
+                status_disconnected: 'Disconnected',
+                status_waiting: 'Waiting for data',
+                last_updated: 'Last Updated',
+                local: 'local',
+                auto_refresh: 'Auto-refresh (1s)',
+                loading: 'Loading...',
+                waiting_predictions: 'Waiting for predictions...',
+                system_health: 'System Health',
+                forecast_performance: 'Forecast Performance',
+                pattern_memory: 'Pattern Memory',
+                metric_latency: 'Latency (Last)',
+                metric_memory: 'Memory Coverage',
+                metric_consensus: 'Ensemble Consensus',
+                metric_uncertainty: 'Uncertainty Score',
+                metric_accuracy: 'Accuracy',
+                metric_dir_accuracy: 'Directional Accuracy',
+                metric_coverage: 'Coverage',
+                metric_confidence: 'Avg Confidence',
+                metric_patterns_total: 'Total Patterns',
+                metric_patterns_active: 'Active Patterns',
+                metric_patterns_contrarian: 'Contrarian',
+                metric_patterns_samples: 'Total Samples',
+                top_patterns: 'Top Patterns',
+                table_pattern: 'Pattern',
+                table_tf: 'TF',
+                table_n: 'N',
+                table_cred: 'Cred',
+                table_diracc: 'DirAcc',
+                table_probs: 'P(UP/DOWN)',
+                table_status: 'Status',
+                show_raw_json: 'Show Raw JSON',
+                unit_min: 'min',
+                label_up: 'UP',
+                label_down: 'DOWN',
+                label_flat: 'FLAT',
+                label_uncertain: 'UNCERTAIN',
+                footer_consensus: 'Consensus',
+                footer_memory: 'Memory',
+                price_pred: 'Price @ pred',
+                price_fact: 'Price @ fact',
+                price_pending: 'pending',
+            },
+            ru: {
+                title: 'Дашборд BTC Oracle',
+                brand: 'Оракул BTCUSDT',
+                nav_models: 'Модели',
+                nav_inputs: 'Входы',
+                nav_patterns: 'Паттерны',
+                status_connected: 'Подключено',
+                status_disconnected: 'Нет связи',
+                status_waiting: 'Ожидание данных',
+                last_updated: 'Последнее обновление',
+                local: 'лок.',
+                auto_refresh: 'Авто-обновление (1с)',
+                loading: 'Загрузка...',
+                waiting_predictions: 'Ожидание прогнозов...',
+                system_health: 'Состояние системы',
+                forecast_performance: 'Качество прогноза',
+                pattern_memory: 'Память паттернов',
+                metric_latency: 'Задержка (последняя)',
+                metric_memory: 'Покрытие памяти',
+                metric_consensus: 'Консенсус ансамбля',
+                metric_uncertainty: 'Неопределенность',
+                metric_accuracy: 'Точность',
+                metric_dir_accuracy: 'Точность направления',
+                metric_coverage: 'Покрытие',
+                metric_confidence: 'Средняя уверенность',
+                metric_patterns_total: 'Всего паттернов',
+                metric_patterns_active: 'Активные паттерны',
+                metric_patterns_contrarian: 'Контртренд',
+                metric_patterns_samples: 'Всего выборок',
+                top_patterns: 'Лучшие паттерны',
+                table_pattern: 'Паттерн',
+                table_tf: 'ТФ',
+                table_n: 'N',
+                table_cred: 'Доверие',
+                table_diracc: 'Точн. напр.',
+                table_probs: 'P(UP/DOWN)',
+                table_status: 'Статус',
+                show_raw_json: 'Показать JSON',
+                unit_min: 'мин',
+                label_up: 'ВВЕРХ',
+                label_down: 'ВНИЗ',
+                label_flat: 'ФЛЭТ',
+                label_uncertain: 'НЕОПРЕДЕЛЕННО',
+                footer_consensus: 'Консенсус',
+                footer_memory: 'Память',
+                price_pred: 'Цена на прогноз',
+                price_fact: 'Цена по факту',
+                price_pending: 'ожидание',
+            }
+        };
+        let connectionState = 'connected';
+        let currentLang = null;
+
+        function detectLang() {
+            const saved = localStorage.getItem(LANG_KEY);
+            if (saved) return saved;
+            const browserLang = (navigator.language || '').toLowerCase();
+            return browserLang.startsWith('ru') ? 'ru' : 'en';
+        }
+
+        function t(key, vars) {
+            const dict = I18N[currentLang] || I18N.en;
+            let text = dict[key] || I18N.en[key] || key;
+            if (vars) {
+                Object.keys(vars).forEach((k) => {
+                    text = text.replace(new RegExp(`\\{${k}\\}`, 'g'), String(vars[k]));
+                });
+            }
+            return text;
+        }
+
+        function applyTranslations(root = document) {
+            root.querySelectorAll('[data-i18n]').forEach((el) => {
+                el.textContent = t(el.dataset.i18n);
+            });
+            root.querySelectorAll('[data-i18n-title]').forEach((el) => {
+                el.title = t(el.dataset.i18nTitle);
+            });
+        }
+
+        function setLanguage(lang) {
+            currentLang = I18N[lang] ? lang : 'en';
+            localStorage.setItem(LANG_KEY, currentLang);
+            document.documentElement.lang = currentLang;
+            document.title = t('title');
+            applyTranslations();
+            setConnectionStatus(connectionState);
+        }
+
+        function setConnectionStatus(state) {
+            connectionState = state;
+            const el = document.getElementById('connection-status');
+            if (!el) return;
+            if (state === 'connected') {
+                el.innerHTML = `<span class="badge bg-success">${t('status_connected')}</span>`;
+            } else if (state === 'waiting') {
+                el.innerHTML = `<span class="badge bg-warning text-dark">${t('status_waiting')}</span>`;
+            } else {
+                el.innerHTML = `<span class="badge bg-danger">${t('status_disconnected')}</span>`;
+            }
+        }
+
+        function localizeLabel(label) {
+            const map = {
+                UP: 'label_up',
+                DOWN: 'label_down',
+                FLAT: 'label_flat',
+                UNCERTAIN: 'label_uncertain',
+            };
+            const key = map[label];
+            return key ? t(key) : label;
+        }
+
         const API_URL = '/predictions/latest';
+        const METRICS_URL = '/api/metrics';
+        const PATTERNS_URL = '/api/patterns/top';
+        const PATTERNS_SUMMARY_URL = '/api/patterns/summary';
+        const CONFIG_URL = '/api/config';
         const AUTO_REFRESH_INTERVAL = 1000;
         let refreshTimer = null;
+        let lastMetricsFetch = 0;
+        let lastPatternsFetch = 0;
+        let horizonOrder = ['1min', '5min', '10min', '15min', '30min', '60min'];
 
         function formatTime(isoString) {
             if (!isoString) return '--:--:--';
-            return new Date(isoString).toLocaleTimeString();
+            const date = new Date(isoString);
+            if (Number.isNaN(date.getTime())) return '--:--:--';
+            return date.toLocaleTimeString(undefined, {
+                hour12: false,
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit'
+            });
+        }
+
+        function formatPrice(value, digits = 2) {
+            if (value === null || value === undefined || Number.isNaN(value)) return '--';
+            return Number(value).toFixed(digits);
         }
 
         function updateCard(template, data, horizon) {
@@ -167,20 +447,38 @@
             
             // Basic Info
             clone.querySelector('.horizon-min').textContent = horizon.replace('min', '');
-            clone.querySelector('.timestamp-badge').textContent = formatTime(data.ts);
+            const badge = clone.querySelector('.timestamp-badge');
+            badge.textContent = formatTime(data.ts);
+            badge.title = data.ts || '';
             
             // Label and Styling
             const labelEl = clone.querySelector('.prediction-label');
-            labelEl.textContent = data.label;
-            labelEl.classList.add('label-' + data.label);
+            const label = data.label || '--';
+            labelEl.textContent = label === '--' ? label : localizeLabel(label);
+            if (data.label) {
+                labelEl.classList.add('label-' + data.label);
+            }
             
             // Reason
-            clone.querySelector('.reason-code').textContent = data.reason_code;
+            clone.querySelector('.reason-code').textContent = data.reason_code || '--';
+
+            const pricePredEl = clone.querySelector('.price-pred');
+            if (pricePredEl) {
+                pricePredEl.textContent = formatPrice(data.price_pred);
+            }
+            const priceFactEl = clone.querySelector('.price-fact');
+            if (priceFactEl) {
+                if (data.price_fact === null || data.price_fact === undefined) {
+                    priceFactEl.textContent = t('price_pending');
+                } else {
+                    priceFactEl.textContent = formatPrice(data.price_fact);
+                }
+            }
             
             // Probabilities
-            const pUp = (data.p_up * 100).toFixed(1);
-            const pDown = (data.p_down * 100).toFixed(1);
-            const pFlat = (data.p_flat * 100).toFixed(1);
+            const pUp = ((data.p_up || 0) * 100).toFixed(1);
+            const pDown = ((data.p_down || 0) * 100).toFixed(1);
+            const pFlat = ((data.p_flat || 0) * 100).toFixed(1);
             
             clone.querySelector('.prob-up').textContent = pUp + '%';
             clone.querySelector('.prob-fill-up').style.width = pUp + '%';
@@ -192,34 +490,154 @@
             clone.querySelector('.prob-fill-flat').style.width = pFlat + '%';
             
             // Footer Stats
-            clone.querySelector('.consensus-val').textContent = (data.consensus * 100).toFixed(0) + '%';
+            clone.querySelector('.consensus-val').textContent = ((data.consensus || 0) * 100).toFixed(0) + '%';
             
             const memVal = data.memory ? (data.memory.credibility * 100).toFixed(0) + '%' : 'N/A';
             clone.querySelector('.memory-val').textContent = memVal;
             
+            applyTranslations(clone);
             return clone;
+        }
+
+        function normalizePrediction(raw) {
+            if (!raw) {
+                return {
+                    label: 'UNCERTAIN',
+                    reason_code: 'WAITING_FOR_DATA',
+                    p_up: 0,
+                    p_down: 0,
+                    p_flat: 0,
+                    consensus: 0,
+                    uncertainty_score: 1,
+                    latency_ms: 0,
+                    price_pred: null,
+                    price_fact: null,
+                };
+            }
+            return raw;
+        }
+
+        async function loadConfig() {
+            try {
+                const response = await fetch(CONFIG_URL);
+                if (!response.ok) return;
+                const payload = await response.json();
+                if (payload && Array.isArray(payload.horizons)) {
+                    horizonOrder = payload.horizons
+                        .slice()
+                        .sort((a, b) => a - b)
+                        .map((h) => `${h}min`);
+                }
+            } catch (error) {
+                // ignore and keep defaults
+            }
+        }
+
+        function formatPercent(value, digits = 1) {
+            if (value === null || value === undefined || Number.isNaN(value)) return '--';
+            return (value * 100).toFixed(digits) + '%';
+        }
+
+        async function fetchMetrics() {
+            const response = await fetch(METRICS_URL);
+            if (!response.ok) return;
+            const payload = await response.json();
+            const metrics = payload.metrics || {};
+
+            const accuracyEl = document.getElementById('metric-accuracy');
+            const dirAccuracyEl = document.getElementById('metric-dir-accuracy');
+            const coverageEl = document.getElementById('metric-coverage');
+            const confidenceEl = document.getElementById('metric-confidence');
+
+            if (accuracyEl) accuracyEl.textContent = (metrics.accuracy ?? 0).toFixed(2) + '%';
+            if (dirAccuracyEl) dirAccuracyEl.textContent = (metrics.directional_accuracy ?? 0).toFixed(2) + '%';
+            if (coverageEl) coverageEl.textContent = (metrics.coverage ?? 0).toFixed(2) + '%';
+            if (confidenceEl) confidenceEl.textContent = formatPercent(metrics.avg_confidence ?? 0);
+        }
+
+        async function fetchPatterns() {
+            const [summaryResp, topResp] = await Promise.all([
+                fetch(PATTERNS_SUMMARY_URL),
+                fetch(PATTERNS_URL),
+            ]);
+            if (summaryResp.ok) {
+                const summaryPayload = await summaryResp.json();
+                const summary = summaryPayload.summary || {};
+                const totalEl = document.getElementById('metric-patterns-total');
+                const activeEl = document.getElementById('metric-patterns-active');
+                const contrarianEl = document.getElementById('metric-patterns-contrarian');
+                const samplesEl = document.getElementById('metric-patterns-samples');
+                const memoryEl = document.getElementById('metric-memory');
+                if (totalEl) totalEl.textContent = summary.total ?? '--';
+                if (activeEl) activeEl.textContent = summary.active ?? '--';
+                if (contrarianEl) contrarianEl.textContent = summary.contrarian ?? '--';
+                if (samplesEl) samplesEl.textContent = summary.total_samples ?? '--';
+                if (memoryEl) {
+                    if (summary.total && summary.active !== undefined) {
+                        memoryEl.textContent = ((summary.active / summary.total) * 100).toFixed(1) + '%';
+                    } else {
+                        memoryEl.textContent = '--';
+                    }
+                }
+            }
+            if (topResp.ok) {
+                const topPayload = await topResp.json();
+                const patterns = topPayload.patterns || [];
+                const tbody = document.getElementById('patterns-table-body');
+                if (!tbody) return;
+                tbody.innerHTML = '';
+                patterns.forEach((p) => {
+                    const tr = document.createElement('tr');
+                    const pid = p.pattern_id ? String(p.pattern_id).slice(0, 8) : '--';
+                    const dirAcc = p.dir_accuracy === null || p.dir_accuracy === undefined ? '--' : (p.dir_accuracy * 100).toFixed(1) + '%';
+                    tr.innerHTML = `
+                        <td>${pid}</td>
+                        <td>${p.timeframe}/${p.horizon}m</td>
+                        <td>${p.n}</td>
+                        <td>${(p.credibility * 100).toFixed(0)}%</td>
+                        <td>${dirAcc}</td>
+                        <td>${(p.p_up * 100).toFixed(0)}% / ${(p.p_down * 100).toFixed(0)}%</td>
+                        <td>${p.status}${p.contrarian ? ' (C)' : ''}</td>
+                    `;
+                    tbody.appendChild(tr);
+                });
+            }
         }
 
         async function fetchData() {
             try {
-                const response = await fetch(API_URL);
+                // #region agent log H5 fetch_start
+                fetch('http://127.0.0.1:7242/ingest/9e46d9ad-4e2c-4f19-b2b6-76b681ffd179',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'api/templates/index.html:fetchData',message:'fetch_start',data:{url:API_URL},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H5'})}).catch(()=>{});
+                // #endregion
+                const response = await fetch(API_URL, { cache: 'no-store' });
+                // #region agent log H5 fetch_response
+                fetch('http://127.0.0.1:7242/ingest/9e46d9ad-4e2c-4f19-b2b6-76b681ffd179',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'api/templates/index.html:fetchData',message:'fetch_response',data:{url:API_URL,status:response.status,ok:response.ok,contentType:response.headers.get('content-type')},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H5'})}).catch(()=>{});
+                // #endregion
                 if (!response.ok) throw new Error('Network response was not ok');
                 const data = await response.json();
+                // #region agent log H5 json_parsed
+                fetch('http://127.0.0.1:7242/ingest/9e46d9ad-4e2c-4f19-b2b6-76b681ffd179',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'api/templates/index.html:fetchData',message:'json_parsed',data:{type:typeof data,keys:Object.keys(data).slice(0,20),keysLen:Object.keys(data).length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H5'})}).catch(()=>{});
+                // #endregion
                 
-                // Update timestamp
-                document.getElementById('last-updated').textContent = new Date().toLocaleTimeString();
+                // Update timestamp to latest prediction time (aligned to market candles)
+                const tsList = Object.values(data)
+                    .map((item) => item && item.ts ? new Date(item.ts) : null)
+                    .filter((item) => item && !Number.isNaN(item.getTime()));
+                const latestTs = tsList.length
+                    ? new Date(Math.max(...tsList.map((item) => item.getTime())))
+                    : null;
+                document.getElementById('last-updated').textContent = latestTs
+                    ? formatTime(latestTs.toISOString())
+                    : '--:--:--';
                 document.getElementById('json-dump').textContent = JSON.stringify(data, null, 2);
                 
+                setConnectionStatus('connected');
                 const container = document.getElementById('predictions-container');
                 container.innerHTML = ''; // Clear current
                 
                 const template = document.getElementById('horizon-card-template');
                 
-                // Sort horizons: 1min, 5min, 15min, 60min
-                const horizonOrder = ['1min', '5min', '15min', '60min'];
-                const sortedKeys = Object.keys(data).sort((a, b) => {
-                    return horizonOrder.indexOf(a) - horizonOrder.indexOf(b);
-                });
+                const sortedKeys = horizonOrder.length ? horizonOrder : Object.keys(data).sort();
 
                 let totalLatency = 0;
                 let count = 0;
@@ -227,28 +645,47 @@
                 let avgConsensus = 0;
 
                 sortedKeys.forEach(key => {
-                    const pred = data[key];
+                    const rawPred = data[key];
+                    const pred = normalizePrediction(rawPred);
                     container.appendChild(updateCard(template, pred, key));
                     
+                    if (!rawPred) {
+                        return;
+                    }
                     // Metrics aggregation
-                    totalLatency += pred.latency_ms;
-                    maxUncertainty = Math.max(maxUncertainty, pred.uncertainty_score);
-                    avgConsensus += pred.consensus;
+                    totalLatency += pred.latency_ms || 0;
+                    maxUncertainty = Math.max(maxUncertainty, pred.uncertainty_score || 0);
+                    avgConsensus += pred.consensus || 0;
                     count++;
                 });
+
+                applyTranslations(container);
 
                 // Update System Metrics
                 if (count > 0) {
                     document.getElementById('metric-latency').textContent = (totalLatency / count).toFixed(1) + ' ms';
                     document.getElementById('metric-uncertainty').textContent = maxUncertainty.toFixed(2);
                     document.getElementById('metric-consensus').textContent = (avgConsensus / count).toFixed(2);
-                    // Memory coverage placeholder
-                    document.getElementById('metric-memory').textContent = data['1min']?.memory ? 'Active' : 'Building';
                 }
+                // #region agent log H6 render_done
+                fetch('http://127.0.0.1:7242/ingest/9e46d9ad-4e2c-4f19-b2b6-76b681ffd179',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'api/templates/index.html:fetchData',message:'render_done',data:{sortedKeysLen:sortedKeys.length,count:count},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H6'})}).catch(()=>{});
+                // #endregion
 
+                const now = Date.now();
+                if (now - lastMetricsFetch > 5000) {
+                    await fetchMetrics();
+                    lastMetricsFetch = now;
+                }
+                if (now - lastPatternsFetch > 10000) {
+                    await fetchPatterns();
+                    lastPatternsFetch = now;
+                }
             } catch (error) {
                 console.error('Error fetching data:', error);
-                document.getElementById('connection-status').innerHTML = '<span class="badge bg-danger">Disconnected</span>';
+                setConnectionStatus('disconnected');
+                // #region agent log H7 fetch_error
+                fetch('http://127.0.0.1:7242/ingest/9e46d9ad-4e2c-4f19-b2b6-76b681ffd179',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'api/templates/index.html:fetchData',message:'fetch_error',data:{url:API_URL,error:String(error)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H7'})}).catch(()=>{});
+                // #endregion
             }
         }
 
@@ -257,7 +694,7 @@
         
         function startTimer() {
             if (refreshTimer) clearInterval(refreshTimer);
-            fetchData(); // Initial fetch
+            loadConfig().finally(() => fetchData());
             refreshTimer = setInterval(fetchData, AUTO_REFRESH_INTERVAL);
         }
 
@@ -269,9 +706,19 @@
             }
         });
 
+        const langSelect = document.getElementById('lang-select');
+        currentLang = detectLang();
+        if (langSelect) {
+            langSelect.value = currentLang;
+            langSelect.addEventListener('change', (e) => {
+                setLanguage(e.target.value);
+                startTimer();
+            });
+        }
+        setLanguage(currentLang);
+
         // Start immediately
         startTimer();
     </script>
 </body>
 </html>
-

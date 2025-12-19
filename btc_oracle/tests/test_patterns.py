@@ -30,7 +30,7 @@ def test_pattern_stats_update():
     # Обновляем FLAT
     stats.update(Label.FLAT, magnitude=0.01)
     assert stats.alpha_flat == 2.0  # 1.0 + 1
-    assert stats.beta_not_flat == 2.0  # 1.0 + 1 (UP и DOWN не FLAT)
+    assert stats.beta_not_flat == 3.0  # 1.0 + 2 (UP и DOWN не FLAT)
     assert stats.n == 3
 
 

@@ -1,5 +1,7 @@
 """Вычисление наград и штрафов."""
 
+from typing import Optional
+
 import numpy as np
 
 from btc_oracle.core.types import Decision, Label

@@ -142,6 +142,29 @@ class DecisionPolicy:
                 memory=forecast.memory_support,
                 latency_ms=latency_ms,
             )
+
+        gap = abs(forecast.p_up - forecast.p_down)
+        if gap >= self.config.decision.dir_gap_min:
+            reason = ReasonCode.WEAK_DIRECTIONAL_SIGNAL
+            if forecast.memory_support and forecast.memory_support.get("credibility", 0) > 0.7:
+                reason = ReasonCode.MEMORY_HIGH_CONFIDENCE
+
+            label = Label.UP if forecast.p_up >= forecast.p_down else Label.DOWN
+            return Decision(
+                label=label,
+                reason_code=reason,
+                ts=ts,
+                symbol=symbol,
+                horizon_min=horizon_min,
+                p_up=forecast.p_up,
+                p_down=forecast.p_down,
+                p_flat=forecast.p_flat,
+                flat_score=forecast.flat_score,
+                uncertainty_score=forecast.uncertainty_score,
+                consensus=forecast.consensus,
+                memory=forecast.memory_support,
+                latency_ms=latency_ms,
+            )
         
         # Fallback: если ничего не подошло → UNCERTAIN
         return Decision(
