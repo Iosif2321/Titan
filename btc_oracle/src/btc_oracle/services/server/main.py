@@ -102,12 +102,11 @@ async def _get_close_price(
     """Получить цену закрытия свечи по времени закрытия."""
     if close_ts.tzinfo is None:
         close_ts = close_ts.replace(tzinfo=timezone.utc)
-    open_ts = close_ts - timedelta(minutes=tf_minutes)
     exact_query = select(Candle.close).where(
         Candle.symbol == symbol,
         Candle.timeframe == timeframe,
         Candle.confirmed == 1,
-        Candle.time == open_ts,
+        Candle.time == close_ts,
     )
     exact_result = await session.execute(exact_query)
     price = exact_result.scalar_one_or_none()

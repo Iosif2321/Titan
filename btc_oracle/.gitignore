@@ -43,6 +43,10 @@ state/
 *.lmdb
 *.mdb
 
+# Source packages named "data"
+!src/btc_oracle/data/
+!src/btc_oracle/data/**
+
 # Checkpoints
 checkpoints/
 *.pt
