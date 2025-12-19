@@ -84,11 +84,13 @@ async def ensure_history(
         
         fetched = 0
         try:
-            async for batch in client.download_history(
+            history_stream = await client.download_history(
                 symbol=symbol,
                 interval=interval_api,
                 days=days,
-            ):
+                stream=True,
+            )
+            async for batch in history_stream:
                 async with AsyncSessionLocal() as batch_session:
                     for candle in batch:
                         await save_candle(batch_session, candle, symbol, timeframe_db)
