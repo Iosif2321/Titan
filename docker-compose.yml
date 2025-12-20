@@ -1,0 +1,15 @@
+version: "3.9"
+
+services:
+  predictor:
+    build: .
+    command: ["--save-jsonl-dir", "/app/out"]
+    volumes:
+      - ./out:/app/out
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    device_requests:
+      - driver: nvidia
+        count: all
+        capabilities: [gpu]

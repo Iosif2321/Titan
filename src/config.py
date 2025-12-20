@@ -7,7 +7,8 @@ class DataConfig:
     interval: str = "1"
     ws_url: str = "wss://stream.bybit.com/v5/public/spot"
     use_confirmed_only: bool = True
-    reconnect_delay: float = 5.0
+    reconnect_delay: float = 1.0
+    ping_interval: float = 20.0
 
 
 @dataclass(frozen=True)
