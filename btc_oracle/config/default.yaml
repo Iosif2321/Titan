@@ -71,12 +71,12 @@ patterns:
     seed: 1337
 
   search:
-    similarity_min: 0.9
+    similarity_min: 0.8
     adaptive_step: 0.02
     target_candidates_min: 20
     target_candidates_max: 50
     full_vector_metric: "cosine"
-    regime_filter: true
+    regime_filter: false
 
   limits:
     ring_buffer: 10000

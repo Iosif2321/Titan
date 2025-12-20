@@ -140,8 +140,9 @@ class FeaturePipeline:
         # Нормализация
         if self.normalize and self.normalizer:
             if self.normalizer.mean is None:
-                # Инициализируем на текущем векторе
                 self.normalizer.fit(feature_vector.reshape(1, -1))
+            else:
+                self.normalizer.partial_fit(feature_vector)
             feature_vector = self.normalizer.transform(feature_vector)
         
         return Features(

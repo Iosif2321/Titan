@@ -103,9 +103,19 @@ class TrainerService:
             logger.warning(f"Missing candles for prediction at {pred.time}")
             return
         
-        # Вычисляем truth label
-        # TODO: получить реальный ATR из features
-        atr = 0.01  # упрощённо
+        # Вычисляем truth label, используя фактический ATR из окна признаков
+        feature_window = await self._get_feature_window(
+            session,
+            pred.time,
+            window_size=self.feature_pipeline.window_size,
+        )
+        if not feature_window:
+            logger.warning("Missing feature window for prediction", ts=pred.time)
+            return
+
+        features = self.feature_pipeline.build_features(feature_window)
+
+        atr = float(features.meta.get("atr", 0.0)) if features.meta else 0.0
         truth_label, magnitude = compute_truth_label(
             forecast_candle,
             truth_candle,
@@ -145,53 +155,44 @@ class TrainerService:
         await session.commit()
         
         # Обновляем pattern store
-        feature_window = await self._get_feature_window(
-            session,
-            pred.time,
-            window_size=self.feature_pipeline.window_size,
+        features.ts = pred.time
+        features.timeframe = self.config.timeframe
+        context = {
+            "p_up": float(pred.p_up),
+            "p_down": float(pred.p_down),
+            "p_flat": float(pred.p_flat),
+            "u_dir": float(pred.uncertainty_score),
+            "u_mag": float(pred.uncertainty_score),
+            "consensus": float(pred.consensus),
+            "disagreement": float(1.0 - pred.consensus),
+        }
+        pattern_key = self.pattern_encoder.encode(
+            features,
+            horizon=horizon,
+            timeframe=self.config.timeframe,
+            context=context,
         )
-        if feature_window:
-            features = self.feature_pipeline.build_features(feature_window)
-            features.ts = pred.time
-            features.timeframe = self.config.timeframe
-            context = {
-                "p_up": float(pred.p_up),
-                "p_down": float(pred.p_down),
-                "p_flat": float(pred.p_flat),
-                "u_dir": float(pred.uncertainty_score),
-                "u_mag": float(pred.uncertainty_score),
-                "consensus": float(pred.consensus),
-                "disagreement": float(1.0 - pred.consensus),
-            }
-            pattern_key = self.pattern_encoder.encode(
-                features,
-                horizon=horizon,
-                timeframe=self.config.timeframe,
-                context=context,
-            )
-            record = DecisionRecord(
-                ts_ms=int(pred.time.timestamp() * 1000),
-                tf_id=horizon,
-                model_id=0,
-                head_id=0,
-                pred_class=_label_to_int(decision.label),
-                actual_class=_label_to_int(truth_label),
-                flags=_build_flags(decision.label, truth_label),
-                p_up=float(decision.p_up),
-                p_down=float(decision.p_down),
-                confidence=_decision_confidence(decision),
-                reward=float(reward),
-                outcome_margin=float(magnitude),
-            )
-            candle_blob = _build_candle_blob(forecast_candle, truth_candle)
-            self.pattern_store.record_decision(
-                pattern_key,
-                record,
-                features=features,
-                candle_blob=candle_blob,
-            )
-        else:
-            logger.debug("Missing feature window for pattern update", ts=pred.time, horizon=horizon)
+        record = DecisionRecord(
+            ts_ms=int(pred.time.timestamp() * 1000),
+            tf_id=horizon,
+            model_id=0,
+            head_id=0,
+            pred_class=_label_to_int(decision.label),
+            actual_class=_label_to_int(truth_label),
+            flags=_build_flags(decision.label, truth_label),
+            p_up=float(decision.p_up),
+            p_down=float(decision.p_down),
+            confidence=_decision_confidence(decision),
+            reward=float(reward),
+            outcome_margin=float(magnitude),
+        )
+        candle_blob = _build_candle_blob(forecast_candle, truth_candle)
+        self.pattern_store.record_decision(
+            pattern_key,
+            record,
+            features=features,
+            candle_blob=candle_blob,
+        )
         
         logger.debug(
             f"Processed prediction: {pred.time} -> {truth_label.value}, "
