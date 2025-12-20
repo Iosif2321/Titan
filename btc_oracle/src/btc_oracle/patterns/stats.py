@@ -126,6 +126,10 @@ class PatternStats:
         hours_passed = (datetime.now() - self.last_seen).total_seconds() / 3600
         if hours_passed <= 0:
             return
+
+        # Пропускаем микродельты, чтобы избежать числового шума при мгновенных обновлениях
+        if hours_passed < 1e-3:
+            return
         
         # Экспоненциальное затухание
         decay_rate = 0.5 ** (hours_passed / half_life_hours)

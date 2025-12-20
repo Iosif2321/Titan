@@ -75,10 +75,16 @@ class PatternEncoder:
 
         if isinstance(context, dict):
             values = [float(context.get(k, 0.0)) for k in _CONTEXT_KEYS]
-            return np.array(values, dtype=np.float32)
+            return self._quantize(values)
 
         values = [float(getattr(context, k, 0.0)) for k in _CONTEXT_KEYS]
-        return np.array(values, dtype=np.float32)
+        return self._quantize(values)
+
+    def _quantize(self, values: list[float]) -> np.ndarray:
+        """Снизить чувствительность ключа к шуму вероятностей."""
+        clipped = [max(0.0, min(1.0, v)) for v in values]
+        rounded = [round(v, 2) for v in clipped]
+        return np.array(rounded, dtype=np.float32)
 
     def _regime_key(self, features: Features, horizon: int) -> int:
         atr = float(features.meta.get("atr", 0.0))

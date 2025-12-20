@@ -87,10 +87,10 @@ class EnsembleAggregator:
         disagreement_dir = float(np.std(p_up_values))
         disagreement_mag = float(np.std(p_flat_values))
 
-        u_dir = u_dir_mean + disagreement_dir
-        u_mag = u_mag_mean + disagreement_mag
+        u_dir = max(0.0, u_dir_mean + disagreement_dir)
+        u_mag = max(0.0, u_mag_mean + disagreement_mag)
 
-        consensus = max(0.0, 1.0 - disagreement_dir - disagreement_mag)
+        consensus = max(0.0, 1.0 - (disagreement_dir + disagreement_mag))
         disagreement = (disagreement_dir + disagreement_mag) / 2.0
 
         return NeuralOpinion(
