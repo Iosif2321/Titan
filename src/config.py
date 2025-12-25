@@ -63,7 +63,7 @@ class FeatureConfig:
 @dataclass
 class DecisionConfig:
     flat_max_prob: float = 0.45
-    flat_max_delta: float = 0.05
+    flat_max_delta: float = 0.06
     use_context_priors: bool = True
     context_trust_min: float = 0.15
     context_flat_gain: float = 0.12
@@ -106,10 +106,15 @@ class TrainingConfig:
     class_balance_min: float = 0.5
     class_balance_max: float = 2.0
     class_balance_floor: float = 0.05
-    temp_init: float = 1.0
-    temp_min: float = 0.5
-    temp_max: float = 5.0
-    temp_lr: float = 0.01
+    calib_lr: float = 0.01
+    calib_a_min: float = 0.05
+    calib_a_max: float = 2.0
+    calib_b_min: float = -1.0
+    calib_b_max: float = 1.0
+    calib_l2_a: float = 1e-4
+    calib_l2_b: float = 1e-4
+    calib_flat_bps: float = 1.0
+    calib_flat_weight: float = 0.25
     calibration_bins: int = 10
     perf_lr_gain: float = 0.4
     perf_lr_min_mult: float = 0.5

@@ -43,9 +43,15 @@ class ConfigManager:
                 "class_balance_min",
                 "class_balance_max",
                 "class_balance_floor",
-                "temp_lr",
-                "temp_min",
-                "temp_max",
+                "calib_lr",
+                "calib_a_min",
+                "calib_a_max",
+                "calib_b_min",
+                "calib_b_max",
+                "calib_l2_a",
+                "calib_l2_b",
+                "calib_flat_bps",
+                "calib_flat_weight",
                 "perf_lr_gain",
                 "perf_lr_min_mult",
                 "perf_lr_max_mult",
@@ -185,29 +191,77 @@ class ConfigManager:
                 else:
                     reject("class_balance_floor", "must be > 0")
 
-            if "temp_lr" in payload:
-                value = payload["temp_lr"]
+            if "calib_lr" in payload:
+                value = payload["calib_lr"]
                 if isinstance(value, (int, float)) and value >= 0:
-                    self.training_config.temp_lr = float(value)
-                    applied["temp_lr"] = self.training_config.temp_lr
+                    self.training_config.calib_lr = float(value)
+                    applied["calib_lr"] = self.training_config.calib_lr
                 else:
-                    reject("temp_lr", "must be >= 0")
+                    reject("calib_lr", "must be >= 0")
 
-            if "temp_min" in payload:
-                value = payload["temp_min"]
+            if "calib_a_min" in payload:
+                value = payload["calib_a_min"]
                 if isinstance(value, (int, float)) and value > 0:
-                    self.training_config.temp_min = float(value)
-                    applied["temp_min"] = self.training_config.temp_min
+                    self.training_config.calib_a_min = float(value)
+                    applied["calib_a_min"] = self.training_config.calib_a_min
                 else:
-                    reject("temp_min", "must be > 0")
+                    reject("calib_a_min", "must be > 0")
 
-            if "temp_max" in payload:
-                value = payload["temp_max"]
+            if "calib_a_max" in payload:
+                value = payload["calib_a_max"]
                 if isinstance(value, (int, float)) and value > 0:
-                    self.training_config.temp_max = float(value)
-                    applied["temp_max"] = self.training_config.temp_max
+                    self.training_config.calib_a_max = float(value)
+                    applied["calib_a_max"] = self.training_config.calib_a_max
                 else:
-                    reject("temp_max", "must be > 0")
+                    reject("calib_a_max", "must be > 0")
+
+            if "calib_b_min" in payload:
+                value = payload["calib_b_min"]
+                if isinstance(value, (int, float)):
+                    self.training_config.calib_b_min = float(value)
+                    applied["calib_b_min"] = self.training_config.calib_b_min
+                else:
+                    reject("calib_b_min", "must be numeric")
+
+            if "calib_b_max" in payload:
+                value = payload["calib_b_max"]
+                if isinstance(value, (int, float)):
+                    self.training_config.calib_b_max = float(value)
+                    applied["calib_b_max"] = self.training_config.calib_b_max
+                else:
+                    reject("calib_b_max", "must be numeric")
+
+            if "calib_l2_a" in payload:
+                value = payload["calib_l2_a"]
+                if isinstance(value, (int, float)) and value >= 0:
+                    self.training_config.calib_l2_a = float(value)
+                    applied["calib_l2_a"] = self.training_config.calib_l2_a
+                else:
+                    reject("calib_l2_a", "must be >= 0")
+
+            if "calib_l2_b" in payload:
+                value = payload["calib_l2_b"]
+                if isinstance(value, (int, float)) and value >= 0:
+                    self.training_config.calib_l2_b = float(value)
+                    applied["calib_l2_b"] = self.training_config.calib_l2_b
+                else:
+                    reject("calib_l2_b", "must be >= 0")
+
+            if "calib_flat_bps" in payload:
+                value = payload["calib_flat_bps"]
+                if isinstance(value, (int, float)) and value >= 0:
+                    self.training_config.calib_flat_bps = float(value)
+                    applied["calib_flat_bps"] = self.training_config.calib_flat_bps
+                else:
+                    reject("calib_flat_bps", "must be >= 0")
+
+            if "calib_flat_weight" in payload:
+                value = payload["calib_flat_weight"]
+                if isinstance(value, (int, float)) and 0 <= value <= 1:
+                    self.training_config.calib_flat_weight = float(value)
+                    applied["calib_flat_weight"] = self.training_config.calib_flat_weight
+                else:
+                    reject("calib_flat_weight", "must be in [0, 1]")
 
             if "perf_lr_gain" in payload:
                 value = payload["perf_lr_gain"]
@@ -401,6 +455,15 @@ class ConfigManager:
             "flat_max_prob": self.decision_config.flat_max_prob,
             "flat_max_delta": self.decision_config.flat_max_delta,
             "flat_bps": self.training_config.flat_bps,
+            "calib_lr": self.training_config.calib_lr,
+            "calib_a_min": self.training_config.calib_a_min,
+            "calib_a_max": self.training_config.calib_a_max,
+            "calib_b_min": self.training_config.calib_b_min,
+            "calib_b_max": self.training_config.calib_b_max,
+            "calib_l2_a": self.training_config.calib_l2_a,
+            "calib_l2_b": self.training_config.calib_l2_b,
+            "calib_flat_bps": self.training_config.calib_flat_bps,
+            "calib_flat_weight": self.training_config.calib_flat_weight,
             "lr_trend": self.lr_config.lr_trend,
             "lr_osc": self.lr_config.lr_osc,
             "lr_vol": self.lr_config.lr_vol,

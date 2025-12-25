@@ -4,22 +4,32 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
-import math
 import jax
 import jax.numpy as jnp
 import numpy as np
 
-from .calibration import TemperatureScaler
+from .calibration import (
+    AffineLogitCalibConfig,
+    AffineLogitCalibState,
+    calibrate_from_logits,
+    update_affine_calib,
+)
 from .config import DecisionConfig, FeatureConfig, ModelInitConfig, ModelLRConfig, TrainingConfig
 from .features import FeatureBuilder, FeatureBundle, MODEL_OSC, MODEL_TREND, MODEL_VOL
 from .metrics import CalibrationMetrics, RollingMetrics
 from .model import weight_norms
-from .online_model import OnlineModel
+from .online_model import OnlineModel, UpdateResult
 from .optimizer import AdamState
 from .pattern_store import PatternStore
 from .state_store import ModelStateStore
 from .types import Candle, Direction, Fact, Prediction, UpdateEvent
 from .utils import clamp, interval_to_ms, now_ms
+
+_CALIB_INIT = {
+    MODEL_TREND: (0.50, 0.00),
+    MODEL_OSC: (0.20, 0.00),
+    MODEL_VOL: (0.20, 0.10),
+}
 
 
 @dataclass
@@ -30,8 +40,12 @@ class PendingPrediction:
     features: np.ndarray
     logits_up: float
     logits_down: float
+    p_up_raw: float
+    p_down_raw: float
     p_up: float
     p_down: float
+    conf_raw: float
+    conf_cal: float
     pred_dir: Direction
     pred_conf: float
     context_key_used: str
@@ -40,12 +54,23 @@ class PendingPrediction:
     trust_dec: float
     prior_ctx: Dict[str, float]
     prior_win_dec: float
-    flat_prob: float
-    flat_delta: float
+    flat_margin: float
     lr_eff: float
     anchor_lambda_eff: float
     anti_pattern: bool
-    temp_used: float
+    calib_a: float
+    calib_b: float
+    calib_n: int
+
+
+@dataclass
+class RunnerConfig:
+    use_ema: bool = True
+    use_patterns: bool = True
+    update_patterns: bool = True
+    enable_training: bool = True
+    enable_anchor: bool = True
+    enable_calibration_update: bool = True
 
 
 class CandleBuffer:
@@ -90,7 +115,9 @@ class ModelRunner:
         pattern_store: PatternStore,
         state_store: ModelStateStore,
         metrics_window: int = 200,
+        runner_config: RunnerConfig | None = None,
     ) -> None:
+        config = runner_config or RunnerConfig()
         self.tf = tf
         self.model_type = model_type
         self.model_id = model_type
@@ -100,14 +127,27 @@ class ModelRunner:
         self.lr_base = lr_base
         self.pattern_store = pattern_store
         self.state_store = state_store
+        self.use_ema = config.use_ema
+        self.use_patterns = config.use_patterns
+        self.update_patterns = config.update_patterns
+        self.enable_training = config.enable_training
+        self.enable_anchor = config.enable_anchor
+        self.enable_calibration_update = config.enable_calibration_update
         self.pending: Dict[int, PendingPrediction] = {}
         self.metrics = RollingMetrics(metrics_window)
         self.calibration = CalibrationMetrics(training.calibration_bins, metrics_window)
-        self.temp_scaler = TemperatureScaler(
-            init_temp=training.temp_init,
-            min_temp=training.temp_min,
-            max_temp=training.temp_max,
-            lr=training.temp_lr,
+        init_a, init_b = _CALIB_INIT.get(model_type, (1.0, 0.0))
+        self.calib_state = AffineLogitCalibState(a=init_a, b=init_b, n=0)
+        self.calib_config = AffineLogitCalibConfig(
+            lr=training.calib_lr,
+            a_min=training.calib_a_min,
+            a_max=training.calib_a_max,
+            b_min=training.calib_b_min,
+            b_max=training.calib_b_max,
+            l2_a=training.calib_l2_a,
+            l2_b=training.calib_l2_b,
+            a_anchor=init_a,
+            b_anchor=init_b,
         )
         self.fact_ema = {
             Direction.UP: 1.0 / 3.0,
@@ -116,7 +156,6 @@ class ModelRunner:
         }
         self.last_class_weight = 1.0
         self.last_perf_mult = 1.0
-        self.last_temp_grad = 0.0
         self.update_count = 0
         self.last_save_ts = 0
         self.model = OnlineModel(
@@ -150,9 +189,16 @@ class ModelRunner:
             if "rolling" in metrics_state:
                 self.metrics.load_state(metrics_state.get("rolling", {}))
                 self.calibration.load_state(metrics_state.get("calibration", {}))
-                temp_state = metrics_state.get("temperature", {})
-                if isinstance(temp_state, dict):
-                    self.temp_scaler.load_state(temp_state)
+                affine_state = metrics_state.get("calibration_affine", {})
+                if isinstance(affine_state, dict):
+                    try:
+                        self.calib_state = AffineLogitCalibState(
+                            a=float(affine_state.get("a", self.calib_state.a)),
+                            b=float(affine_state.get("b", self.calib_state.b)),
+                            n=int(affine_state.get("n", self.calib_state.n)),
+                        )
+                    except (TypeError, ValueError):
+                        pass
                 fact_ema = metrics_state.get("fact_ema")
                 if isinstance(fact_ema, dict):
                     for key, direction in (
@@ -167,40 +213,81 @@ class ModelRunner:
             else:
                 self.metrics.load_state(metrics_state)
 
+    def set_runtime_flags(
+        self,
+        *,
+        enable_training: Optional[bool] = None,
+        update_patterns: Optional[bool] = None,
+        enable_calibration_update: Optional[bool] = None,
+        enable_anchor: Optional[bool] = None,
+        use_ema: Optional[bool] = None,
+        use_patterns: Optional[bool] = None,
+    ) -> None:
+        if enable_training is not None:
+            self.enable_training = enable_training
+        if update_patterns is not None:
+            self.update_patterns = update_patterns
+        if enable_calibration_update is not None:
+            self.enable_calibration_update = enable_calibration_update
+        if enable_anchor is not None:
+            self.enable_anchor = enable_anchor
+        if use_ema is not None:
+            self.use_ema = use_ema
+        if use_patterns is not None:
+            self.use_patterns = use_patterns
+
     def predict(self, candle: Candle, candles: List[Candle], now_ts: int) -> Optional[Prediction]:
         bundle = self.feature_builder.build(candles)
         if bundle is None:
             return None
-        context_key_used, trust_ctx, prior_ctx = self._context_stats(bundle, now_ts)
+        if self.use_patterns:
+            context_key_used, trust_ctx, prior_ctx = self._context_stats(bundle, now_ts)
+        else:
+            context_key_used = f"{self.tf}:{self.model_id}:disabled"
+            trust_ctx = 0.0
+            prior_ctx = {
+                "p_up": 1.0 / 3.0,
+                "p_down": 1.0 / 3.0,
+                "p_flat": 1.0 / 3.0,
+            }
         logit_up, logit_down, raw_p_up, raw_p_down = self.model.predict(
-            bundle.values, use_ema=True
+            bundle.values, use_ema=self.use_ema
         )
         self._sync_calibration_config()
-        p_up, p_down = self.temp_scaler.probs(logit_up, logit_down)
-        base_dir = decide_direction(p_up, p_down, self.decision.flat_max_prob, self.decision.flat_max_delta)
+        p_up, p_down = calibrate_from_logits(logit_up, logit_down, self.calib_state)
+        base_dir = decide_direction(p_up, p_down, self.decision.flat_max_delta)
 
-        decision_key_used, trust_dec, prior_win_dec, anti_pattern = self._decision_stats(
-            bundle,
-            base_dir,
-            now_ts,
-        )
-        flat_prob, flat_delta = self._apply_context_adjustments(
-            base_dir,
-            trust_ctx,
-            prior_ctx,
-            self.decision.flat_max_prob,
-            self.decision.flat_max_delta,
-        )
+        if self.use_patterns:
+            decision_key_used, trust_dec, prior_win_dec, anti_pattern = self._decision_stats(
+                bundle,
+                base_dir,
+                now_ts,
+            )
+            flat_margin = self._apply_context_adjustments(
+                base_dir,
+                trust_ctx,
+                prior_ctx,
+                self.decision.flat_max_delta,
+            )
+        else:
+            decision_key_used = f"{context_key_used}|PRED={base_dir.value}"
+            trust_dec = 0.0
+            prior_win_dec = 0.5
+            anti_pattern = False
+            flat_margin = self.decision.flat_max_delta
         notes: List[str] = []
         final_dir = base_dir
-        if anti_pattern and base_dir != Direction.FLAT:
-            flat_prob = clamp(flat_prob + self.decision.anti_flat_prob_boost, 0.0, 1.0)
-            flat_delta = clamp(flat_delta + self.decision.anti_flat_delta_boost, 0.0, 1.0)
-            final_dir = decide_direction(p_up, p_down, flat_prob, flat_delta)
+        if anti_pattern and base_dir != Direction.FLAT and self.use_patterns:
+            flat_margin = clamp(
+                flat_margin + self.decision.anti_flat_delta_boost + self.decision.anti_flat_prob_boost,
+                0.0,
+                0.5,
+            )
+            final_dir = decide_direction(p_up, p_down, flat_margin)
             if final_dir == Direction.FLAT:
                 notes.append("anti_pattern_abstain")
 
-        if final_dir != base_dir:
+        if final_dir != base_dir and self.use_patterns:
             decision_key_used, trust_dec, prior_win_dec, _ = self._decision_stats(
                 bundle,
                 final_dir,
@@ -208,8 +295,11 @@ class ModelRunner:
             )
 
         lr_eff, anchor_lambda_eff = self._adaptation(trust_dec, prior_win_dec)
-        confidence = max(p_up, p_down)
-        temp_used = self.temp_scaler.temp
+        conf_raw = max(raw_p_up, raw_p_down)
+        conf_cal = max(p_up, p_down)
+        calib_a = float(self.calib_state.a)
+        calib_b = float(self.calib_state.b)
+        calib_n = int(self.calib_state.n)
         target_ts = candle.start_ts + interval_to_ms(self.tf)
         prediction = Prediction(
             ts=now_ts,
@@ -223,7 +313,7 @@ class ModelRunner:
             p_up=p_up,
             p_down=p_down,
             direction=final_dir,
-            confidence=confidence,
+            confidence=conf_cal,
             used_ema=True,
             context_key_used=context_key_used,
             decision_key_used=decision_key_used,
@@ -232,17 +322,21 @@ class ModelRunner:
             prior_ctx=prior_ctx,
             prior_win_dec=prior_win_dec,
             flat_thresholds={
-                "flat_prob": flat_prob,
-                "flat_delta": flat_delta,
-                "base_flat_prob": self.decision.flat_max_prob,
-                "base_flat_delta": self.decision.flat_max_delta,
+                "flat_margin": flat_margin,
+                "base_flat_margin": self.decision.flat_max_delta,
             },
             notes=",".join(notes),
             meta={
                 "feature_schema": self.feature_builder.spec.schema_version,
-                "temperature": temp_used,
                 "p_up_raw": raw_p_up,
                 "p_down_raw": raw_p_down,
+                "p_up_cal": p_up,
+                "p_down_cal": p_down,
+                "conf_raw": conf_raw,
+                "conf_cal": conf_cal,
+                "calib_a": calib_a,
+                "calib_b": calib_b,
+                "calib_n": calib_n,
             },
         )
 
@@ -253,22 +347,27 @@ class ModelRunner:
             features=bundle.values,
             logits_up=logit_up,
             logits_down=logit_down,
+            p_up_raw=raw_p_up,
+            p_down_raw=raw_p_down,
             p_up=p_up,
             p_down=p_down,
+            conf_raw=conf_raw,
+            conf_cal=conf_cal,
             pred_dir=final_dir,
-            pred_conf=confidence,
+            pred_conf=conf_cal,
             context_key_used=context_key_used,
             decision_key_used=decision_key_used,
             trust_ctx=trust_ctx,
             trust_dec=trust_dec,
             prior_ctx=prior_ctx,
             prior_win_dec=prior_win_dec,
-            flat_prob=flat_prob,
-            flat_delta=flat_delta,
+            flat_margin=flat_margin,
             lr_eff=lr_eff,
             anchor_lambda_eff=anchor_lambda_eff,
             anti_pattern=anti_pattern,
-            temp_used=temp_used,
+            calib_a=calib_a,
+            calib_b=calib_b,
+            calib_n=calib_n,
         )
         return prediction
 
@@ -294,18 +393,36 @@ class ModelRunner:
         self._update_fact_ema(fact.direction)
         target = target_vector(fact.direction)
 
-        allow_anchor_update = reward > 0 or pending.trust_dec >= self.pattern_store.config.fine_trust_threshold
-        if reward == 0 and pending.anti_pattern:
+        anchor_lambda_eff = pending.anchor_lambda_eff
+        if not self.enable_anchor or not self.enable_training:
+            anchor_lambda_eff = 0.0
+
+        allow_anchor_update = reward > 0
+        if self.use_patterns:
+            allow_anchor_update = allow_anchor_update or (
+                pending.trust_dec >= self.pattern_store.config.fine_trust_threshold
+            )
+            if reward == 0 and pending.anti_pattern:
+                allow_anchor_update = False
+        if not self.enable_anchor or not self.enable_training:
             allow_anchor_update = False
 
-        update_result = self.model.update(
-            pending.features,
-            target,
-            lr_eff=pending.lr_eff,
-            anchor_lambda=pending.anchor_lambda_eff,
-            sample_weight=sample_weight,
-            allow_anchor_update=allow_anchor_update,
-        )
+        if not self.enable_training:
+            update_result = UpdateResult(
+                loss_task=0.0,
+                loss_total=0.0,
+                lr_eff=0.0,
+                weight_norms=weight_norms(self.model.params),
+            )
+        else:
+            update_result = self.model.update(
+                pending.features,
+                target,
+                lr_eff=pending.lr_eff,
+                anchor_lambda=anchor_lambda_eff,
+                sample_weight=sample_weight,
+                allow_anchor_update=allow_anchor_update,
+            )
         self.metrics.update(pending.pred_dir, fact.direction, reward)
         if pending.pred_dir != Direction.FLAT:
             self.calibration.update(
@@ -313,9 +430,26 @@ class ModelRunner:
                 pending.pred_dir == fact.direction,
                 abs(fact.ret_bps),
             )
-        temp_grad = self.temp_scaler.update(pending.logits_up, pending.logits_down, fact.direction)
+        calib_weight = 1.0
+        if fact.direction == Direction.UP:
+            y_up = 1.0
+        elif fact.direction == Direction.DOWN:
+            y_up = 0.0
+        else:
+            y_up = 0.5
+        if fact.direction == Direction.FLAT or abs(fact.ret_bps) <= self.training.calib_flat_bps:
+            y_up = 0.5
+            calib_weight = self.training.calib_flat_weight
+        if self.enable_calibration_update and self.enable_training:
+            self.calib_state = update_affine_calib(
+                self.calib_state,
+                pending.logits_up,
+                pending.logits_down,
+                y_up=y_up,
+                weight=calib_weight,
+                cfg=self.calib_config,
+            )
         self.last_class_weight = class_weight
-        self.last_temp_grad = float(temp_grad or 0.0)
         self.update_count += 1
 
         update_event = UpdateEvent(
@@ -333,7 +467,7 @@ class ModelRunner:
             loss_task=update_result.loss_task,
             loss_total=update_result.loss_total,
             lr_eff=update_result.lr_eff,
-            anchor_lambda_eff=pending.anchor_lambda_eff,
+            anchor_lambda_eff=anchor_lambda_eff,
             weight_norms={
                 "params": weight_norms(self.model.params),
                 "ema": weight_norms(self.model.ema_params),
@@ -347,58 +481,66 @@ class ModelRunner:
                 "flat_penalty": flat_penalty,
                 "sample_weight": sample_weight,
                 "class_weight": class_weight,
-                "temp_used": pending.temp_used,
-                "temp_grad": self.last_temp_grad,
-                "temp_lr": self.temp_scaler.lr,
+                "p_up_raw": pending.p_up_raw,
+                "p_down_raw": pending.p_down_raw,
+                "p_up_cal": pending.p_up,
+                "p_down_cal": pending.p_down,
+                "conf_raw": pending.conf_raw,
+                "conf_cal": pending.conf_cal,
+                "calib_a": pending.calib_a,
+                "calib_b": pending.calib_b,
+                "calib_n": pending.calib_n,
+                "calib_weight": calib_weight,
             },
         )
 
-        self.pattern_store.update_patterns(
-            tf=self.tf,
-            model_id=self.model_id,
-            context_key=pending.context_key_used,
-            decision_key=pending.decision_key_used,
-            pred_dir=pending.pred_dir,
-            fact_dir=fact.direction,
-            reward=reward,
-            ts=now_ts,
-        )
-        self.pattern_store.record_event(
-            kind="context",
-            pattern_key=pending.context_key_used,
-            ts=now_ts,
-            tf=self.tf,
-            model_id=self.model_id,
-            candle_ts=pending.candle_ts,
-            target_ts=pending.target_ts,
-            close_prev=pending.close_prev,
-            close_curr=candle.close,
-            pred_dir=pending.pred_dir,
-            pred_conf=pending.pred_conf,
-            fact_dir=fact.direction,
-            reward=reward,
-            ret_bps=fact.ret_bps,
-            lr_eff=update_result.lr_eff,
-            anchor_lambda_eff=pending.anchor_lambda_eff,
-        )
-        self.pattern_store.record_event(
-            kind="decision",
-            pattern_key=pending.decision_key_used,
-            ts=now_ts,
-            tf=self.tf,
-            model_id=self.model_id,
-            candle_ts=pending.candle_ts,
-            target_ts=pending.target_ts,
-            close_prev=pending.close_prev,
-            close_curr=candle.close,
-            pred_dir=pending.pred_dir,
-            pred_conf=pending.pred_conf,
-            fact_dir=fact.direction,
-            reward=reward,
-            ret_bps=fact.ret_bps,
-            lr_eff=update_result.lr_eff,
-            anchor_lambda_eff=pending.anchor_lambda_eff,
-        )
+        if self.update_patterns and self.use_patterns:
+            self.pattern_store.update_patterns(
+                tf=self.tf,
+                model_id=self.model_id,
+                context_key=pending.context_key_used,
+                decision_key=pending.decision_key_used,
+                pred_dir=pending.pred_dir,
+                fact_dir=fact.direction,
+                reward=reward,
+                ts=now_ts,
+            )
+            self.pattern_store.record_event(
+                kind="context",
+                pattern_key=pending.context_key_used,
+                ts=now_ts,
+                tf=self.tf,
+                model_id=self.model_id,
+                candle_ts=pending.candle_ts,
+                target_ts=pending.target_ts,
+                close_prev=pending.close_prev,
+                close_curr=candle.close,
+                pred_dir=pending.pred_dir,
+                pred_conf=pending.pred_conf,
+                fact_dir=fact.direction,
+                reward=reward,
+                ret_bps=fact.ret_bps,
+                lr_eff=update_result.lr_eff,
+                anchor_lambda_eff=anchor_lambda_eff,
+            )
+            self.pattern_store.record_event(
+                kind="decision",
+                pattern_key=pending.decision_key_used,
+                ts=now_ts,
+                tf=self.tf,
+                model_id=self.model_id,
+                candle_ts=pending.candle_ts,
+                target_ts=pending.target_ts,
+                close_prev=pending.close_prev,
+                close_curr=candle.close,
+                pred_dir=pending.pred_dir,
+                pred_conf=pending.pred_conf,
+                fact_dir=fact.direction,
+                reward=reward,
+                ret_bps=fact.ret_bps,
+                lr_eff=update_result.lr_eff,
+                anchor_lambda_eff=anchor_lambda_eff,
+            )
         return fact, update_event
 
     def maybe_save(self, now_ts: int, autosave_seconds: int, autosave_updates: int) -> bool:
@@ -409,7 +551,6 @@ class ModelRunner:
             should_save = True
         if not should_save:
             return False
-        temp_state = self.temp_scaler.to_state()
         self.state_store.save_state(
             model_id=self.model_id,
             tf=self.tf,
@@ -421,13 +562,10 @@ class ModelRunner:
             metrics={
                 "rolling": self.metrics.to_state(),
                 "calibration": self.calibration.to_state(),
-                "temperature": {
-                    "log_temp": temp_state.log_temp,
-                    "lr": temp_state.lr,
-                    "min_temp": temp_state.min_temp,
-                    "max_temp": temp_state.max_temp,
-                    "count": temp_state.count,
-                    "last_grad": temp_state.last_grad,
+                "calibration_affine": {
+                    "a": float(self.calib_state.a),
+                    "b": float(self.calib_state.b),
+                    "n": int(self.calib_state.n),
                 },
                 "fact_ema": {
                     "UP": self.fact_ema.get(Direction.UP, 0.0),
@@ -442,7 +580,18 @@ class ModelRunner:
     def metrics_snapshot(self) -> Dict[str, object]:
         snapshot = self.metrics.snapshot()
         snapshot["calibration"] = self.calibration.snapshot()
-        snapshot["temperature"] = self.temp_scaler.snapshot()
+        snapshot["calibration_affine"] = {
+            "a": float(self.calib_state.a),
+            "b": float(self.calib_state.b),
+            "n": int(self.calib_state.n),
+            "lr": float(self.calib_config.lr),
+            "a_min": float(self.calib_config.a_min),
+            "a_max": float(self.calib_config.a_max),
+            "b_min": float(self.calib_config.b_min),
+            "b_max": float(self.calib_config.b_max),
+            "a_anchor": float(self.calib_config.a_anchor),
+            "b_anchor": float(self.calib_config.b_anchor),
+        }
         snapshot["fact_ema"] = {
             "UP": self.fact_ema.get(Direction.UP, 0.0),
             "DOWN": self.fact_ema.get(Direction.DOWN, 0.0),
@@ -453,10 +602,18 @@ class ModelRunner:
         return snapshot
 
     def _sync_calibration_config(self) -> None:
-        self.temp_scaler.lr = self.training.temp_lr
-        self.temp_scaler.min_temp = self.training.temp_min
-        self.temp_scaler.max_temp = self.training.temp_max
-        self.temp_scaler.log_temp = math.log(self.temp_scaler.temp)
+        self.calib_config.lr = self.training.calib_lr
+        self.calib_config.a_min = self.training.calib_a_min
+        self.calib_config.a_max = self.training.calib_a_max
+        self.calib_config.b_min = self.training.calib_b_min
+        self.calib_config.b_max = self.training.calib_b_max
+        self.calib_config.l2_a = self.training.calib_l2_a
+        self.calib_config.l2_b = self.training.calib_l2_b
+        self.calib_state = AffineLogitCalibState(
+            a=clamp(self.calib_state.a, self.calib_config.a_min, self.calib_config.a_max),
+            b=clamp(self.calib_state.b, self.calib_config.b_min, self.calib_config.b_max),
+            n=self.calib_state.n,
+        )
 
     def _class_weight(self, fact_dir: Direction) -> float:
         if fact_dir == Direction.FLAT:
@@ -532,26 +689,22 @@ class ModelRunner:
         pred_dir: Direction,
         trust_ctx: float,
         prior_ctx: Dict[str, float],
-        flat_prob: float,
-        flat_delta: float,
-    ) -> tuple[float, float]:
+        flat_margin: float,
+    ) -> float:
         if not self.decision.use_context_priors:
-            return flat_prob, flat_delta
+            return flat_margin
         if trust_ctx < self.decision.context_trust_min:
-            return flat_prob, flat_delta
+            return flat_margin
         flat_boost = self.decision.context_flat_gain * trust_ctx * prior_ctx.get("p_flat", 0.0)
-        flat_prob = clamp(flat_prob + flat_boost, 0.0, 1.0)
-        flat_delta = clamp(flat_delta + flat_boost, 0.0, 1.0)
+        flat_margin = clamp(flat_margin + flat_boost, 0.0, 0.5)
         bias = prior_ctx.get("p_up", 0.0) - prior_ctx.get("p_down", 0.0)
         if pred_dir == Direction.UP and bias > 0:
             reduce = self.decision.context_dir_gain * trust_ctx * min(1.0, abs(bias))
-            flat_prob = clamp(flat_prob - reduce, 0.0, 1.0)
-            flat_delta = clamp(flat_delta - reduce, 0.0, 1.0)
+            flat_margin = clamp(flat_margin - reduce, 0.0, 0.5)
         if pred_dir == Direction.DOWN and bias < 0:
             reduce = self.decision.context_dir_gain * trust_ctx * min(1.0, abs(bias))
-            flat_prob = clamp(flat_prob - reduce, 0.0, 1.0)
-            flat_delta = clamp(flat_delta - reduce, 0.0, 1.0)
-        return flat_prob, flat_delta
+            flat_margin = clamp(flat_margin - reduce, 0.0, 0.5)
+        return flat_margin
 
     def _adaptation(self, trust_dec: float, prior_win: float) -> tuple[float, float]:
         lr_mult = clamp(
@@ -591,6 +744,7 @@ class MultiTimeframeEngine:
         lrs: ModelLRConfig,
         pattern_store: PatternStore,
         state_store: ModelStateStore,
+        runner_config: RunnerConfig | None = None,
     ) -> None:
         self.tfs = tfs
         self.pattern_store = pattern_store
@@ -619,6 +773,7 @@ class MultiTimeframeEngine:
                     lr_base=lrs.lr_trend,
                     pattern_store=pattern_store,
                     state_store=state_store,
+                    runner_config=runner_config,
                 ),
                 ModelRunner(
                     tf=tf,
@@ -630,6 +785,7 @@ class MultiTimeframeEngine:
                     lr_base=lrs.lr_osc,
                     pattern_store=pattern_store,
                     state_store=state_store,
+                    runner_config=runner_config,
                 ),
                 ModelRunner(
                     tf=tf,
@@ -641,6 +797,7 @@ class MultiTimeframeEngine:
                     lr_base=lrs.lr_vol,
                     pattern_store=pattern_store,
                     state_store=state_store,
+                    runner_config=runner_config,
                 ),
             ]
 
@@ -709,7 +866,11 @@ class MultiTimeframeEngine:
                             "lr_base": runner.lr_base,
                             "updates": runner.update_count,
                             "metrics": metrics_payload,
-                            "temperature": runner.temp_scaler.snapshot(),
+                            "calibration_affine": {
+                                "a": float(runner.calib_state.a),
+                                "b": float(runner.calib_state.b),
+                                "n": int(runner.calib_state.n),
+                            },
                             "perf_lr_mult": runner.last_perf_mult,
                             "last_class_weight": runner.last_class_weight,
                         },
@@ -748,9 +909,30 @@ class MultiTimeframeEngine:
                     }
                 )
 
+    def set_runtime_flags(
+        self,
+        *,
+        enable_training: Optional[bool] = None,
+        update_patterns: Optional[bool] = None,
+        enable_calibration_update: Optional[bool] = None,
+        enable_anchor: Optional[bool] = None,
+        use_ema: Optional[bool] = None,
+        use_patterns: Optional[bool] = None,
+    ) -> None:
+        for runners in self.runners.values():
+            for runner in runners:
+                runner.set_runtime_flags(
+                    enable_training=enable_training,
+                    update_patterns=update_patterns,
+                    enable_calibration_update=enable_calibration_update,
+                    enable_anchor=enable_anchor,
+                    use_ema=use_ema,
+                    use_patterns=use_patterns,
+                )
 
-def decide_direction(p_up: float, p_down: float, flat_prob: float, flat_delta: float) -> Direction:
-    if (p_up < flat_prob and p_down < flat_prob) or abs(p_up - p_down) < flat_delta:
+
+def decide_direction(p_up: float, p_down: float, flat_margin: float) -> Direction:
+    if abs(p_up - 0.5) < flat_margin:
         return Direction.FLAT
     return Direction.UP if p_up > p_down else Direction.DOWN
 

@@ -66,7 +66,7 @@ class AntiPatternAbstainTests(unittest.TestCase):
                 pattern_store=store,
                 state_store=state_store,
             )
-            runner.model.predict = lambda features, use_ema=True: (0.0, 0.0, 0.53, 0.47)
+            runner.model.predict = lambda features, use_ema=True: (1.0, 0.0, 0.73, 0.27)
 
             candle = Candle(
                 start_ts=now,

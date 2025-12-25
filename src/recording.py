@@ -44,32 +44,45 @@ class JsonlRecorder:
         )
 
     def record_prediction(self, prediction: Prediction) -> None:
-        self._predictions.write(
-            {
-                "ts": prediction.ts,
-                "tf": prediction.tf,
-                "model_id": prediction.model_id,
-                "model_type": prediction.model_type,
-                "candle_ts": prediction.candle_ts,
-                "target_ts": prediction.target_ts,
-                "logits_up": prediction.logits_up,
-                "logits_down": prediction.logits_down,
-                "p_up": prediction.p_up,
-                "p_down": prediction.p_down,
-                "dir": prediction.direction.value,
-                "confidence": prediction.confidence,
-                "used_ema": prediction.used_ema,
-                "context_key_used": prediction.context_key_used,
-                "decision_key_used": prediction.decision_key_used,
-                "trust_ctx": prediction.trust_ctx,
-                "trust_dec": prediction.trust_dec,
-                "prior_ctx": prediction.prior_ctx,
-                "prior_win_dec": prediction.prior_win_dec,
-                "flat_thresholds": prediction.flat_thresholds,
-                "notes": prediction.notes,
-                "meta": prediction.meta,
-            }
-        )
+        payload = {
+            "ts": prediction.ts,
+            "tf": prediction.tf,
+            "model_id": prediction.model_id,
+            "model_type": prediction.model_type,
+            "candle_ts": prediction.candle_ts,
+            "target_ts": prediction.target_ts,
+            "logits_up": prediction.logits_up,
+            "logits_down": prediction.logits_down,
+            "p_up": prediction.p_up,
+            "p_down": prediction.p_down,
+            "dir": prediction.direction.value,
+            "confidence": prediction.confidence,
+            "used_ema": prediction.used_ema,
+            "context_key_used": prediction.context_key_used,
+            "decision_key_used": prediction.decision_key_used,
+            "trust_ctx": prediction.trust_ctx,
+            "trust_dec": prediction.trust_dec,
+            "prior_ctx": prediction.prior_ctx,
+            "prior_win_dec": prediction.prior_win_dec,
+            "flat_thresholds": prediction.flat_thresholds,
+            "notes": prediction.notes,
+            "meta": prediction.meta,
+        }
+        if isinstance(prediction.meta, dict):
+            for key in (
+                "p_up_raw",
+                "p_down_raw",
+                "p_up_cal",
+                "p_down_cal",
+                "conf_raw",
+                "conf_cal",
+                "calib_a",
+                "calib_b",
+                "calib_n",
+            ):
+                if key in prediction.meta:
+                    payload[key] = prediction.meta[key]
+        self._predictions.write(payload)
 
     def record_fact(self, fact: Fact) -> None:
         self._facts.write(
@@ -85,29 +98,42 @@ class JsonlRecorder:
         )
 
     def record_update(self, update: UpdateEvent) -> None:
-        self._updates.write(
-            {
-                "ts": update.ts,
-                "tf": update.tf,
-                "model_id": update.model_id,
-                "model_type": update.model_type,
-                "target_ts": update.target_ts,
-                "candle_ts": update.candle_ts,
-                "pred_dir": update.pred_dir.value,
-                "pred_conf": update.pred_conf,
-                "fact_dir": update.fact_dir.value,
-                "ret_bps": update.ret_bps,
-                "reward": update.reward,
-                "loss_task": update.loss_task,
-                "loss_total": update.loss_total,
-                "lr_eff": update.lr_eff,
-                "anchor_lambda_eff": update.anchor_lambda_eff,
-                "weight_norms": update.weight_norms,
-                "anchor_update_applied": update.anchor_update_applied,
-                "notes": update.notes,
-                "meta": update.meta,
-            }
-        )
+        payload = {
+            "ts": update.ts,
+            "tf": update.tf,
+            "model_id": update.model_id,
+            "model_type": update.model_type,
+            "target_ts": update.target_ts,
+            "candle_ts": update.candle_ts,
+            "pred_dir": update.pred_dir.value,
+            "pred_conf": update.pred_conf,
+            "fact_dir": update.fact_dir.value,
+            "ret_bps": update.ret_bps,
+            "reward": update.reward,
+            "loss_task": update.loss_task,
+            "loss_total": update.loss_total,
+            "lr_eff": update.lr_eff,
+            "anchor_lambda_eff": update.anchor_lambda_eff,
+            "weight_norms": update.weight_norms,
+            "anchor_update_applied": update.anchor_update_applied,
+            "notes": update.notes,
+            "meta": update.meta,
+        }
+        if isinstance(update.meta, dict):
+            for key in (
+                "p_up_raw",
+                "p_down_raw",
+                "p_up_cal",
+                "p_down_cal",
+                "conf_raw",
+                "conf_cal",
+                "calib_a",
+                "calib_b",
+                "calib_n",
+            ):
+                if key in update.meta:
+                    payload[key] = update.meta[key]
+        self._updates.write(payload)
 
     def record_analysis(self, payload: Dict[str, Any]) -> None:
         self._analysis.write(payload)

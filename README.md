@@ -83,6 +83,22 @@ http://localhost:8000
 - `state/state.db`: model params/EMA/anchor + optimizer + metrics
 - `state/patterns.db`: pattern memory + events
 
+## Calibration
+
+Each model applies online affine logit calibration on the UP/DOWN margin:
+
+```
+m = logit_up - logit_down
+m_cal = a * m + b
+p_up = sigmoid(m_cal)
+p_down = 1 - p_up
+```
+
+Per-model `(a, b)` are updated after each closed candle and persisted in `state.db`.
+JSONL includes raw vs calibrated probabilities (`p_up_raw`, `p_up_cal`, `conf_raw`, `conf_cal`).
+
+To verify: watch `avg_conf` and `ece` in metrics/analysis; expect avg confidence to drop and ECE to improve over time.
+
 ## Separate analysis loop
 
 Runs interim analysis every 30 minutes for up to 12 hours (or until stopped).
@@ -92,6 +108,45 @@ python -m src.analysis_loop \
   --updates ./out/updates.jsonl \
   --analysis-out ./out/analysis.jsonl
 ```
+
+## Offline replay
+
+Run a fast offline replay on historical Bybit Spot candles. It uses the same
+closed-candle handler as live mode, but writes reports to a run directory and
+keeps state isolated from production.
+
+Smoke test (quick sanity):
+
+```bash
+python -m src.offline_replay --symbol BTCUSDT --tf 1 --minutes 120 --mode smoke
+```
+
+Train replay:
+
+```bash
+python -m src.offline_replay \
+  --symbol BTCUSDT --tf 1 \
+  --start "2025-12-25T09:00:00Z" --end "2025-12-25T13:00:00Z" \
+  --mode train --run-dir ./runs/offline_20251225_0900_1300
+```
+
+Walk-forward:
+
+```bash
+python -m src.offline_replay \
+  --symbol BTCUSDT --tf 1 \
+  --start "2025-12-25T00:00:00Z" --end "2025-12-26T00:00:00Z" \
+  --mode walkforward --train-min 60 --eval-min 20 \
+  --run-dir ./runs/wf_20251225
+```
+
+Artifacts:
+
+- `runs/<name>/out/*.jsonl`
+- `runs/<name>/summary.json` + `runs/<name>/report.md`
+
+If checks fail, the replay exits with a non-zero status and the errors are listed
+in the report.
 
 ## Docs
 

@@ -137,10 +137,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=float,
         default=training_defaults.class_balance_floor,
     )
-    parser.add_argument("--temp-init", type=float, default=training_defaults.temp_init)
-    parser.add_argument("--temp-min", type=float, default=training_defaults.temp_min)
-    parser.add_argument("--temp-max", type=float, default=training_defaults.temp_max)
-    parser.add_argument("--temp-lr", type=float, default=training_defaults.temp_lr)
+    parser.add_argument("--calib-lr", type=float, default=training_defaults.calib_lr)
+    parser.add_argument("--calib-a-min", type=float, default=training_defaults.calib_a_min)
+    parser.add_argument("--calib-a-max", type=float, default=training_defaults.calib_a_max)
+    parser.add_argument("--calib-b-min", type=float, default=training_defaults.calib_b_min)
+    parser.add_argument("--calib-b-max", type=float, default=training_defaults.calib_b_max)
+    parser.add_argument("--calib-l2-a", type=float, default=training_defaults.calib_l2_a)
+    parser.add_argument("--calib-l2-b", type=float, default=training_defaults.calib_l2_b)
+    parser.add_argument("--calib-flat-bps", type=float, default=training_defaults.calib_flat_bps)
+    parser.add_argument(
+        "--calib-flat-weight", type=float, default=training_defaults.calib_flat_weight
+    )
     parser.add_argument(
         "--calibration-bins",
         type=int,
@@ -316,10 +323,15 @@ async def run(args: argparse.Namespace) -> None:
         class_balance_min=args.class_balance_min,
         class_balance_max=args.class_balance_max,
         class_balance_floor=args.class_balance_floor,
-        temp_init=args.temp_init,
-        temp_min=args.temp_min,
-        temp_max=args.temp_max,
-        temp_lr=args.temp_lr,
+        calib_lr=args.calib_lr,
+        calib_a_min=args.calib_a_min,
+        calib_a_max=args.calib_a_max,
+        calib_b_min=args.calib_b_min,
+        calib_b_max=args.calib_b_max,
+        calib_l2_a=args.calib_l2_a,
+        calib_l2_b=args.calib_l2_b,
+        calib_flat_bps=args.calib_flat_bps,
+        calib_flat_weight=args.calib_flat_weight,
         calibration_bins=args.calibration_bins,
         perf_lr_gain=args.perf_lr_gain,
         perf_lr_min_mult=args.perf_lr_min_mult,

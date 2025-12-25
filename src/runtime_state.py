@@ -102,7 +102,7 @@ def _candle_to_dict(candle: Optional[Candle]) -> Optional[Dict[str, Any]]:
 def _prediction_to_dict(pred: Optional[Prediction]) -> Optional[Dict[str, Any]]:
     if pred is None:
         return None
-    return {
+    payload = {
         "ts": pred.ts,
         "tf": pred.tf,
         "model_id": pred.model_id,
@@ -126,6 +126,21 @@ def _prediction_to_dict(pred: Optional[Prediction]) -> Optional[Dict[str, Any]]:
         "notes": pred.notes,
         "meta": pred.meta,
     }
+    if isinstance(pred.meta, dict):
+        for key in (
+            "p_up_raw",
+            "p_down_raw",
+            "p_up_cal",
+            "p_down_cal",
+            "conf_raw",
+            "conf_cal",
+            "calib_a",
+            "calib_b",
+            "calib_n",
+        ):
+            if key in pred.meta:
+                payload[key] = pred.meta[key]
+    return payload
 
 
 def _fact_to_dict(fact: Optional[Fact]) -> Optional[Dict[str, Any]]:
@@ -145,7 +160,7 @@ def _fact_to_dict(fact: Optional[Fact]) -> Optional[Dict[str, Any]]:
 def _update_to_dict(update: Optional[UpdateEvent]) -> Optional[Dict[str, Any]]:
     if update is None:
         return None
-    return {
+    payload = {
         "ts": update.ts,
         "tf": update.tf,
         "model_id": update.model_id,
@@ -166,3 +181,18 @@ def _update_to_dict(update: Optional[UpdateEvent]) -> Optional[Dict[str, Any]]:
         "notes": update.notes,
         "meta": update.meta,
     }
+    if isinstance(update.meta, dict):
+        for key in (
+            "p_up_raw",
+            "p_down_raw",
+            "p_up_cal",
+            "p_down_cal",
+            "conf_raw",
+            "conf_cal",
+            "calib_a",
+            "calib_b",
+            "calib_n",
+        ):
+            if key in update.meta:
+                payload[key] = update.meta[key]
+    return payload

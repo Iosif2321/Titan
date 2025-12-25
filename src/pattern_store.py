@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import sqlite3
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
 from .config import PatternConfig
@@ -522,6 +523,33 @@ class PatternStore:
             }
         return out
 
+    def coverage_summary(self, tf: str, model_id: str) -> Dict[str, int]:
+        cur = self.conn.execute(
+            "SELECT kind, pattern_key FROM pattern_stats WHERE tf = ? AND model_id = ?",
+            (tf, model_id),
+        )
+        counts = {
+            "total": 0,
+            "context_fine": 0,
+            "context_coarse": 0,
+            "decision_fine": 0,
+            "decision_coarse": 0,
+            "unknown": 0,
+        }
+        for row in cur.fetchall():
+            kind = str(row["kind"])
+            key = str(row["pattern_key"])
+            context_key = key.split("|PRED=", 1)[0] if kind == "decision" else key
+            if ":fine:" in context_key:
+                bucket = f"{kind}_fine"
+            elif ":coarse:" in context_key:
+                bucket = f"{kind}_coarse"
+            else:
+                bucket = "unknown"
+            counts["total"] += 1
+            counts[bucket] = counts.get(bucket, 0) + 1
+        return counts
+
     def dump_patterns(self, keys: Iterable[str]) -> Dict[str, PatternStats]:
         if not keys:
             return {}
@@ -535,3 +563,79 @@ class PatternStore:
             stat = self._row_to_stat(row)
             out[stat.pattern_key] = stat
         return out
+
+
+class NullPatternStore:
+    def __init__(self, config: Optional[PatternConfig] = None) -> None:
+        self.config = config or PatternConfig(db_path=Path("state/patterns.db"))
+
+    def close(self) -> None:
+        return None
+
+    def get_stat(self, pattern_key: str) -> Optional[PatternStats]:
+        return None
+
+    def trust(self, stat: Optional[PatternStats], now_ts: int) -> float:
+        return 0.0
+
+    def is_anti_pattern(self, stat: Optional[PatternStats], now_ts: int) -> bool:
+        return False
+
+    def update_patterns(
+        self,
+        tf: str,
+        model_id: str,
+        context_key: str,
+        decision_key: str,
+        pred_dir: Direction,
+        fact_dir: Direction,
+        reward: float,
+        ts: int,
+    ) -> tuple[Optional[PatternStats], Optional[PatternStats]]:
+        return None, None
+
+    def record_event(
+        self,
+        kind: str,
+        pattern_key: str,
+        ts: int,
+        tf: str,
+        model_id: str,
+        candle_ts: int,
+        target_ts: int,
+        close_prev: float,
+        close_curr: float,
+        pred_dir: Direction,
+        pred_conf: float,
+        fact_dir: Direction,
+        reward: float,
+        ret_bps: float,
+        lr_eff: float,
+        anchor_lambda_eff: float,
+    ) -> None:
+        return None
+
+    def maintenance(self, now_ts: Optional[int] = None) -> None:
+        return None
+
+    def top_patterns(self, tf: str, model_id: str, limit: int = 10) -> Dict[str, List[Dict[str, object]]]:
+        return {"good": [], "anti": []}
+
+    def stats_overview(self, tf: str, model_id: str) -> Dict[str, object]:
+        return {"total": 0}
+
+    def stats_summary(self, tf: str, model_id: str) -> Dict[str, object]:
+        return {"total": 0, "context": 0, "decision": 0}
+
+    def usage_summary(self, tf: str, model_id: str, since_ts: int) -> Dict[str, object]:
+        return {"total_events": 0, "distinct_patterns": 0}
+
+    def coverage_summary(self, tf: str, model_id: str) -> Dict[str, int]:
+        return {
+            "total": 0,
+            "context_fine": 0,
+            "context_coarse": 0,
+            "decision_fine": 0,
+            "decision_coarse": 0,
+            "unknown": 0,
+        }
