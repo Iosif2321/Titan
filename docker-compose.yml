@@ -3,9 +3,23 @@ version: "3.9"
 services:
   predictor:
     build: .
-    command: ["--save-jsonl-dir", "/app/out"]
+    command:
+      [
+        "--save-jsonl-dir",
+        "/app/out",
+        "--state-db",
+        "/app/state/state.db",
+        "--pattern-db",
+        "/app/state/patterns.db",
+        "--dashboard",
+        "--dashboard-port",
+        "8000"
+      ]
     volumes:
       - ./out:/app/out
+      - ./state:/app/state
+    ports:
+      - "8000:8000"
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility

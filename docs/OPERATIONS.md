@@ -1,10 +1,8 @@
-# BTCUSDT Predictor (JAX)
+# Operations
 
-Multi-timeframe BTCUSDT spot predictor using Bybit public WebSocket + REST warmup. No trading. Three independent models per TF (TRENDVIC, OSCILLATOR, VOLUMEMETRIX) with EMA/anchor memory, pattern-aware adaptation, JSONL artifacts, and a minimal dashboard.
+## WSL2 (GPU)
 
-## WSL2 setup (GPU)
-
-1. Verify GPU is visible:
+1. Verify GPU visibility:
    ```bash
    nvidia-smi
    ```
@@ -26,7 +24,7 @@ Multi-timeframe BTCUSDT spot predictor using Bybit public WebSocket + REST warmu
      --dashboard-port 8000
    ```
 
-## WSL2 setup (CPU)
+## WSL2 (CPU)
 
 ```bash
 python3 -m venv .venv
@@ -61,6 +59,12 @@ docker run --gpus all --rm \
 docker compose up --build
 ```
 
+## Persistence mounts
+
+- `out/` stores JSONL artifacts.
+- `state/state.db` stores model params/EMA/anchor/optimizer + metrics.
+- `state/patterns.db` stores pattern memory + events.
+
 ## Diagnostics
 
 ```bash
@@ -69,23 +73,7 @@ python -m src.main --dry-run
 
 This prints `jax.default_backend()` and `jax.devices()` then exits.
 
-## Dashboard
-
-Start with `--dashboard --dashboard-port 8000` and open:
-
-```
-http://localhost:8000
-```
-
-## Artifacts & State
-
-- `out/`: JSONL artifacts (`candles.jsonl`, `predictions.jsonl`, `facts.jsonl`, `updates.jsonl`, `analysis.jsonl`)
-- `state/state.db`: model params/EMA/anchor + optimizer + metrics
-- `state/patterns.db`: pattern memory + events
-
 ## Separate analysis loop
-
-Runs interim analysis every 30 minutes for up to 12 hours (or until stopped).
 
 ```bash
 python -m src.analysis_loop \
@@ -93,8 +81,8 @@ python -m src.analysis_loop \
   --analysis-out ./out/analysis.jsonl
 ```
 
-## Docs
+## Logging
 
-- `docs/ARCHITECTURE.md`
-- `docs/PATTERNS.md`
-- `docs/OPERATIONS.md`
+- Use `--log-level INFO|DEBUG|WARNING`.
+- Monitor WS reconnects and DB growth.
+- Pattern maintenance runs periodically (see `--maintenance-seconds`).

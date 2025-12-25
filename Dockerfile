@@ -12,8 +12,7 @@ WORKDIR /app
 
 COPY requirements-base.txt requirements-gpu.txt requirements-cpu.txt requirements.txt ./
 RUN python -m pip install --upgrade pip \
-    && python -m pip install --no-cache-dir -r requirements-base.txt \
-    && python -m pip install --upgrade --no-cache-dir "jax[cuda12]"
+    && python -m pip install --no-cache-dir -r requirements-gpu.txt
 
 COPY src ./src
 

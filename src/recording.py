@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 from typing import Any, Dict
 
-from .types import Candle, Prediction
+from .types import Candle, Fact, Prediction, UpdateEvent
 
 
 class JsonlWriter:
@@ -24,6 +24,9 @@ class JsonlRecorder:
         directory.mkdir(parents=True, exist_ok=True)
         self._candles = JsonlWriter(directory / "candles.jsonl")
         self._predictions = JsonlWriter(directory / "predictions.jsonl")
+        self._facts = JsonlWriter(directory / "facts.jsonl")
+        self._updates = JsonlWriter(directory / "updates.jsonl")
+        self._analysis = JsonlWriter(directory / "analysis.jsonl")
 
     def record_candle(self, candle: Candle) -> None:
         self._candles.write(
@@ -36,19 +39,82 @@ class JsonlRecorder:
                 "c": candle.close,
                 "volume": candle.volume,
                 "confirmed": candle.confirmed,
+                "tf": candle.tf,
             }
         )
 
     def record_prediction(self, prediction: Prediction) -> None:
         self._predictions.write(
             {
+                "ts": prediction.ts,
+                "tf": prediction.tf,
+                "model_id": prediction.model_id,
+                "model_type": prediction.model_type,
                 "candle_ts": prediction.candle_ts,
+                "target_ts": prediction.target_ts,
+                "logits_up": prediction.logits_up,
+                "logits_down": prediction.logits_down,
                 "p_up": prediction.p_up,
                 "p_down": prediction.p_down,
-                "direction": prediction.direction.value,
+                "dir": prediction.direction.value,
+                "confidence": prediction.confidence,
+                "used_ema": prediction.used_ema,
+                "context_key_used": prediction.context_key_used,
+                "decision_key_used": prediction.decision_key_used,
+                "trust_ctx": prediction.trust_ctx,
+                "trust_dec": prediction.trust_dec,
+                "prior_ctx": prediction.prior_ctx,
+                "prior_win_dec": prediction.prior_win_dec,
+                "flat_thresholds": prediction.flat_thresholds,
+                "notes": prediction.notes,
+                "meta": prediction.meta,
             }
         )
+
+    def record_fact(self, fact: Fact) -> None:
+        self._facts.write(
+            {
+                "tf": fact.tf,
+                "prev_ts": fact.prev_ts,
+                "curr_ts": fact.curr_ts,
+                "close_prev": fact.close_prev,
+                "close_curr": fact.close_curr,
+                "ret_bps": fact.ret_bps,
+                "fact_dir": fact.direction.value,
+            }
+        )
+
+    def record_update(self, update: UpdateEvent) -> None:
+        self._updates.write(
+            {
+                "ts": update.ts,
+                "tf": update.tf,
+                "model_id": update.model_id,
+                "model_type": update.model_type,
+                "target_ts": update.target_ts,
+                "candle_ts": update.candle_ts,
+                "pred_dir": update.pred_dir.value,
+                "pred_conf": update.pred_conf,
+                "fact_dir": update.fact_dir.value,
+                "ret_bps": update.ret_bps,
+                "reward": update.reward,
+                "loss_task": update.loss_task,
+                "loss_total": update.loss_total,
+                "lr_eff": update.lr_eff,
+                "anchor_lambda_eff": update.anchor_lambda_eff,
+                "weight_norms": update.weight_norms,
+                "anchor_update_applied": update.anchor_update_applied,
+                "notes": update.notes,
+                "meta": update.meta,
+            }
+        )
+
+    def record_analysis(self, payload: Dict[str, Any]) -> None:
+        self._analysis.write(payload)
 
     def close(self) -> None:
         self._candles.close()
         self._predictions.close()
+        self._facts.close()
+        self._updates.close()
+        self._analysis.close()

@@ -1,23 +1,18 @@
 # src/fact_movement.py
 import argparse
 import asyncio
-import json
 import logging
-import time
-import urllib.parse
-import urllib.request
 from collections import deque
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Deque, List, Optional
+from typing import Deque, Optional
 
+from .bybit_rest import fetch_klines
 from .bybit_ws import stream_candles
-from .config import DataConfig
+from .config import DataConfig, RestConfig
 from .recording import JsonlWriter
 from .types import Candle, Direction
-
-BYBIT_REST_KLINE_URL = "https://api.bybit.com/v5/market/kline"
+from .utils import ts_iso
 
 
 @dataclass(frozen=True)
@@ -29,19 +24,6 @@ class FactMove:
     delta: float
     ret_bps: float
     direction: Direction
-
-
-def _ts_iso(ts_ms: int) -> str:
-    return datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).isoformat()
-
-
-def _end_ts_from_interval(start_ts: int, interval: str) -> int:
-    # Для нашего use-case TF=1m (и любых числовых минутных интервалов)
-    try:
-        minutes = int(interval)
-    except ValueError:
-        minutes = 1
-    return start_ts + minutes * 60_000 - 1
 
 
 def _direction_from_close(
@@ -70,68 +52,6 @@ def _make_fact(prev: Candle, curr: Candle, flat_bps: float) -> FactMove:
     )
 
 
-def fetch_recent_candles_rest(
-    symbol: str, interval: str, limit: int, timeout_s: float = 10.0
-) -> List[Candle]:
-    """
-    Public REST Bybit: GET /v5/market/kline?category=spot&symbol=...&interval=...&limit=...
-    result.list: массив строковых массивов, отсортирован в обратном порядке по startTime. :contentReference[oaicite:2]{index=2}
-    """
-    qs = urllib.parse.urlencode(
-        {"category": "spot", "symbol": symbol, "interval": interval, "limit": str(limit)}
-    )
-    url = f"{BYBIT_REST_KLINE_URL}?{qs}"
-    req = urllib.request.Request(url, headers={"User-Agent": "Titan-FactMovement/1.0"})
-    with urllib.request.urlopen(req, timeout=timeout_s) as resp:
-        payload = json.loads(resp.read().decode("utf-8"))
-
-    if payload.get("retCode") != 0:
-        raise RuntimeError(
-            f"Bybit REST error: retCode={payload.get('retCode')} retMsg={payload.get('retMsg')}"
-        )
-
-    lst = payload.get("result", {}).get("list", [])
-    candles: List[Candle] = []
-
-    # Переворачиваем, чтобы получить возрастающий порядок по времени
-    for item in reversed(lst):
-        if not isinstance(item, list) or len(item) < 6:
-            continue
-        start_ts = int(item[0])
-        candles.append(
-            Candle(
-                start_ts=start_ts,
-                end_ts=_end_ts_from_interval(start_ts, interval),
-                open=float(item[1]),
-                high=float(item[2]),
-                low=float(item[3]),
-                close=float(item[4]),
-                volume=float(item[5]),
-                confirmed=True,
-            )
-        )
-
-    # Dedup по start_ts на всякий случай
-    dedup: List[Candle] = []
-    last_ts: Optional[int] = None
-    for c in candles:
-        if last_ts is not None and c.start_ts == last_ts:
-            dedup[-1] = c
-        else:
-            dedup.append(c)
-            last_ts = c.start_ts
-
-    # Убираем текущую минуту (open candle), чтобы не ловить "колебания"
-    try:
-        interval_ms = int(interval) * 60_000
-    except ValueError:
-        interval_ms = 60_000
-    now_ms = int(time.time() * 1000)
-    current_start = (now_ms // interval_ms) * interval_ms
-
-    return [c for c in dedup if c.start_ts < current_start]
-
-
 def _print_summary(facts: Deque[FactMove], window: int) -> None:
     last = list(facts)[-window:]
     pattern = " ".join(f.direction.value for f in last)
@@ -141,7 +61,7 @@ def _print_summary(facts: Deque[FactMove], window: int) -> None:
     net_bps = sum(f.ret_bps for f in last)
     logging.info(
         "FACT asof=%s last_%d=[%s] up=%d down=%d flat=%d net_bps=%.2f",
-        _ts_iso(last[-1].curr_start_ts),
+        ts_iso(last[-1].curr_start_ts),
         window,
         pattern,
         up,
@@ -155,8 +75,8 @@ def _print_fact_line(f: FactMove) -> None:
     # ✅ тут добавили цены (close_prev/close_curr)
     logging.info(
         "  %s vs %s dir=%s close_prev=%.2f close_curr=%.2f delta=%.2f ret_bps=%.2f",
-        _ts_iso(f.prev_start_ts),
-        _ts_iso(f.curr_start_ts),
+        ts_iso(f.prev_start_ts),
+        ts_iso(f.curr_start_ts),
         f.direction.value,
         f.close_prev,
         f.close_curr,
@@ -167,11 +87,12 @@ def _print_fact_line(f: FactMove) -> None:
 
 def build_arg_parser() -> argparse.ArgumentParser:
     d = DataConfig()
+    r = RestConfig()
     p = argparse.ArgumentParser(
         description="FACT movement (close-to-close), Bybit Spot kline 1m."
     )
     p.add_argument("--symbol", default=d.symbol)
-    p.add_argument("--interval", default=d.interval)
+    p.add_argument("--tf", default=d.tfs[0])
     p.add_argument("--ws-url", default=d.ws_url)
     p.add_argument("--reconnect-delay", type=float, default=d.reconnect_delay)
     p.add_argument("--ping-interval", type=float, default=d.ping_interval)
@@ -180,7 +101,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--window", type=int, default=5)
     p.add_argument("--flat-bps", type=float, default=0.0)
 
-    p.add_argument("--history-limit", type=int, default=50, help="REST warmup candles (startup).")
+    p.add_argument(
+        "--history-limit",
+        type=int,
+        default=r.history_limit,
+        help="REST warmup candles (startup).",
+    )
     p.add_argument("--no-history", action="store_true", help="Disable REST warmup (will need time to fill).")
 
     p.add_argument("--print-details", action="store_true")
@@ -197,7 +123,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 async def run_live(args: argparse.Namespace) -> None:
     data_cfg = DataConfig(
         symbol=args.symbol,
-        interval=args.interval,
+        tfs=[args.tf],
         ws_url=args.ws_url,
         use_confirmed_only=True,  # WS: только закрытые свечи (confirm=true) :contentReference[oaicite:3]{index=3}
         reconnect_delay=args.reconnect_delay,
@@ -219,8 +145,11 @@ async def run_live(args: argparse.Namespace) -> None:
     # 1) REST warmup: чтобы сразу иметь последние 5 направлений
     if not args.no_history:
         try:
-            hist = fetch_recent_candles_rest(
-                args.symbol, args.interval, limit=max(args.history_limit, window + 2)
+            hist = fetch_klines(
+                args.symbol,
+                args.tf,
+                limit=max(args.history_limit, window + 2),
+                rest_config=RestConfig(),
             )
             if len(hist) >= window + 1:
                 warm = hist[-(window + 1):]

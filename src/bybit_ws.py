@@ -2,7 +2,7 @@ import asyncio
 import contextlib
 import json
 import logging
-from typing import AsyncIterator, List
+from typing import AsyncIterator, Iterable, List
 
 import websockets
 
@@ -19,6 +19,11 @@ def _parse_kline_message(raw: str) -> List[Candle]:
     topic = msg.get("topic", "")
     if not isinstance(topic, str) or not topic.startswith("kline."):
         return []
+
+    parts = topic.split(".")
+    if len(parts) < 3:
+        return []
+    interval = parts[1]
 
     data = msg.get("data", [])
     if not isinstance(data, list):
@@ -37,6 +42,7 @@ def _parse_kline_message(raw: str) -> List[Candle]:
                     close=float(item["close"]),
                     volume=float(item["volume"]),
                     confirmed=bool(item.get("confirm", False)),
+                    tf=interval,
                 )
             )
         except (KeyError, TypeError, ValueError):
@@ -53,9 +59,13 @@ async def _ping_loop(ws, interval: float) -> None:
             break
 
 
+def _build_topics(symbol: str, tfs: Iterable[str]) -> List[str]:
+    return [f"kline.{tf}.{symbol}" for tf in tfs]
+
+
 async def stream_candles(config: DataConfig) -> AsyncIterator[Candle]:
-    topic = f"kline.{config.interval}.{config.symbol}"
-    sub_msg = {"op": "subscribe", "args": [topic]}
+    topics = _build_topics(config.symbol, config.tfs)
+    sub_msg = {"op": "subscribe", "args": topics}
     base_delay = max(config.reconnect_delay, 1.0)
     backoff = base_delay
     max_backoff = 60.0
@@ -78,6 +88,8 @@ async def stream_candles(config: DataConfig) -> AsyncIterator[Candle]:
                         candles = _parse_kline_message(raw)
                         for candle in candles:
                             if config.use_confirmed_only and not candle.confirmed:
+                                continue
+                            if candle.tf not in config.tfs:
                                 continue
                             yield candle
                 finally:

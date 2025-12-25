@@ -1,0 +1,53 @@
+﻿Conversation Context Summary (ASCII)
+
+Project:
+- BTCUSDT spot prediction system (Bybit public data), no trading/orders.
+- Multi-timeframe architecture with per-TF models (TFs: 1/5/10/15/30/60 supported).
+
+Core Architecture:
+- Three independent models per TF: TRENDVIC, OSCILLATOR, VOLUMEMETRIX.
+- Inputs:
+  * TRENDVIC: OHLCV + MA, MACD, Parabolic SAR.
+  * OSCILLATOR: RSI, Stochastic, CCI (no raw OHLCV).
+  * VOLUMEMETRIX: OHLCV + OBV, MFI, volume z-score.
+- Each model outputs logits/p_up/p_down, direction (UP/DOWN/FLAT), confidence.
+- Prediction timing: pred(t) compared to fact(t+TF) with no lookahead; pending stores features + close_prev.
+
+Model Memory + Updates:
+- params, ema_params (inference), anchor_params (long-term memory).
+- EMA update after each online update; anchor update gated by reward/trust.
+- Anchor regularization in loss; adaptive lr/anchor based on pattern trust.
+
+Pattern Memory (SQLite):
+- Tables: pattern_stats (context/decision), pattern_events (debug history).
+- Trust = support * recency * quality; fine/coarse keys with fallback.
+- Anti-patterns increase abstain/FLAT threshold; no direction flipping.
+- Maintenance cleanup by TTL/max patterns/events.
+
+Persistence:
+- SQLite model_state with versioning; params/ema/anchor/opt/metrics blobs.
+- Autosave by time and update count.
+
+Data Layer:
+- WS: kline.tf.symbol, confirmed candles by default, ping+reconnect, dedupe.
+- REST warmup from Bybit public API to fill lookback window.
+
+Artifacts (JSONL):
+- candles.jsonl, predictions.jsonl, facts.jsonl, updates.jsonl, analysis.jsonl.
+
+Dashboard:
+- Minimal HTTP dashboard (aiohttp) with /api/health, /api/state, /api/models, /api/patterns/top, /api/config.
+
+Commands:
+- Dry-run: python -m src.main --dry-run
+- Live run: python -m src.main --tfs "1" --save-jsonl-dir ./out --state-db ./state/state.db --pattern-db ./state/patterns.db --dashboard --dashboard-port 8000
+- Separate analysis loop: python -m src.analysis_loop --updates ./out/updates.jsonl --analysis-out ./out/analysis.jsonl
+
+Recent Observations:
+- WSL2 GPU run: JAX backend=gpu, TPU warning is expected when libtpu missing.
+- Initial performance (limited sample): new models ~79 updates each; TRENDVIC acc ~0.506, OSC/VOL ~0.456; base_1m acc ~0.406. Baseline (always DOWN) ~0.532 in that window.
+
+Changes Added in Code:
+- New periodic analysis loop (src/analysis_loop.py) as separate process.
+- Inline analysis in main disabled by default; opt-in via --analysis-inline.
+- Analysis output stored to analysis.jsonl.

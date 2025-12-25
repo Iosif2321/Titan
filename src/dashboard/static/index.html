@@ -1,0 +1,411 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Titan Live</title>
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='0.9em' font-size='90'%3ET%3C/text%3E%3C/svg%3E"
+    />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      :root {
+        --bg: #0b0d12;
+        --panel: rgba(18, 22, 30, 0.78);
+        --accent: #4aa3ff;
+        --up: #00b894;
+        --down: #d63031;
+        --flat: #f9ca24;
+        --text: #e6edf3;
+        --muted: #8b97a3;
+        --border: rgba(255, 255, 255, 0.08);
+        --shadow: 0 12px 24px rgba(0, 0, 0, 0.35);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        background: radial-gradient(circle at top, #121826, #0b0d12);
+        color: var(--text);
+        font-family: "Outfit", sans-serif;
+        min-height: 100vh;
+      }
+
+      header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 18px 24px;
+        margin: 16px;
+        border: 1px solid var(--border);
+        border-radius: 16px;
+        background: var(--panel);
+        box-shadow: var(--shadow);
+      }
+
+      .title {
+        font-size: 1.25rem;
+        font-weight: 600;
+        letter-spacing: 0.6px;
+      }
+
+      .status {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 0.75rem;
+        text-transform: uppercase;
+        letter-spacing: 0.6px;
+        padding: 6px 12px;
+        border-radius: 999px;
+        border: 1px solid var(--border);
+      }
+
+      .status.up {
+        color: var(--up);
+        background: rgba(0, 184, 148, 0.15);
+      }
+
+      .status.down {
+        color: var(--down);
+        background: rgba(214, 48, 49, 0.15);
+      }
+
+      main {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+        gap: 16px;
+        padding: 0 16px 24px;
+      }
+
+      section {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 16px;
+        padding: 16px;
+        box-shadow: var(--shadow);
+      }
+
+      h2 {
+        margin: 0 0 12px;
+        font-size: 0.95rem;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+        color: var(--muted);
+      }
+
+      .kpi-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+        gap: 12px;
+      }
+
+      .kpi {
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 12px;
+        background: rgba(255, 255, 255, 0.03);
+      }
+
+      .kpi-label {
+        font-size: 0.7rem;
+        text-transform: uppercase;
+        letter-spacing: 0.8px;
+        color: var(--muted);
+      }
+
+      .kpi-value {
+        font-size: 1.15rem;
+        font-weight: 600;
+        margin-top: 6px;
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.8rem;
+      }
+
+      th,
+      td {
+        padding: 8px 6px;
+        text-align: left;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+      }
+
+      th {
+        color: var(--muted);
+        text-transform: uppercase;
+        font-size: 0.65rem;
+        letter-spacing: 0.8px;
+      }
+
+      .pill {
+        padding: 2px 8px;
+        border-radius: 999px;
+        font-size: 0.65rem;
+        text-transform: uppercase;
+        letter-spacing: 0.6px;
+        display: inline-block;
+      }
+
+      .pill.up {
+        background: rgba(0, 184, 148, 0.2);
+        color: var(--up);
+      }
+
+      .pill.down {
+        background: rgba(214, 48, 49, 0.2);
+        color: var(--down);
+      }
+
+      .pill.flat {
+        background: rgba(249, 202, 36, 0.2);
+        color: var(--flat);
+      }
+
+      .footer {
+        text-align: center;
+        padding: 16px;
+        font-size: 0.75rem;
+        color: var(--muted);
+      }
+
+      .link-button {
+        display: inline-block;
+        margin-top: 6px;
+        padding: 6px 12px;
+        border-radius: 999px;
+        border: 1px solid var(--border);
+        color: var(--text);
+        text-decoration: none;
+        font-size: 0.7rem;
+        letter-spacing: 0.6px;
+        text-transform: uppercase;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div class="title">Titan Live</div>
+      <div class="status down" id="ws-status">offline</div>
+    </header>
+
+    <main>
+      <section>
+        <h2>System</h2>
+        <div class="kpi-grid" id="system-kpis"></div>
+        <a class="link-button" href="/debug">Debug View</a>
+      </section>
+
+      <section>
+        <h2>Latest Candles</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>TF</th>
+              <th>Close</th>
+              <th>Range</th>
+              <th>Time</th>
+            </tr>
+          </thead>
+          <tbody id="candles-body"></tbody>
+        </table>
+      </section>
+
+      <section>
+        <h2>Recent Predictions</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>TF</th>
+              <th>Model</th>
+              <th>Dir</th>
+              <th>Conf</th>
+              <th>Target</th>
+            </tr>
+          </thead>
+          <tbody id="predictions-body"></tbody>
+        </table>
+      </section>
+
+      <section>
+        <h2>Recent Updates</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>TF</th>
+              <th>Model</th>
+              <th>Pred</th>
+              <th>Fact</th>
+              <th>Reward</th>
+            </tr>
+          </thead>
+          <tbody id="updates-body"></tbody>
+        </table>
+      </section>
+
+      <section>
+        <h2>Model Metrics</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>TF</th>
+              <th>Model</th>
+              <th>Acc</th>
+              <th>Flat</th>
+              <th>Reward</th>
+            </tr>
+          </thead>
+          <tbody id="metrics-body"></tbody>
+        </table>
+      </section>
+    </main>
+
+    <div class="footer">Titan dashboard (polling 1s)</div>
+
+    <script>
+      const wsStatusEl = document.getElementById("ws-status");
+      const systemKpis = document.getElementById("system-kpis");
+      const candlesBody = document.getElementById("candles-body");
+      const predictionsBody = document.getElementById("predictions-body");
+      const updatesBody = document.getElementById("updates-body");
+      const metricsBody = document.getElementById("metrics-body");
+
+      const formatNum = (value, digits = 2) => {
+        if (value === null || value === undefined || Number.isNaN(value)) return "-";
+        return Number(value).toFixed(digits);
+      };
+
+      const formatPct = (value) => {
+        if (value === null || value === undefined || Number.isNaN(value)) return "-";
+        return `${(Number(value) * 100).toFixed(2)}%`;
+      };
+
+      const formatTs = (ts) => {
+        if (!ts) return "-";
+        const date = new Date(ts);
+        if (Number.isNaN(date.getTime())) return "-";
+        return date.toISOString().replace("T", " ").slice(0, 19);
+      };
+
+      const pill = (value) => {
+        const cls = value === "UP" ? "up" : value === "DOWN" ? "down" : "flat";
+        return `<span class="pill ${cls}">${value}</span>`;
+      };
+
+      function renderSystem(state) {
+        const jax = state.jax || {};
+        const ws = state.ws || {};
+        wsStatusEl.textContent = ws.connected ? "live" : "offline";
+        wsStatusEl.className = `status ${ws.connected ? "up" : "down"}`;
+        systemKpis.innerHTML = `
+          <div class="kpi">
+            <div class="kpi-label">Backend</div>
+            <div class="kpi-value">${jax.backend || "-"}</div>
+          </div>
+          <div class="kpi">
+            <div class="kpi-label">Devices</div>
+            <div class="kpi-value">${(jax.devices || []).length}</div>
+          </div>
+          <div class="kpi">
+            <div class="kpi-label">WS Status</div>
+            <div class="kpi-value">${ws.connected ? "Connected" : "Offline"}</div>
+          </div>
+        `;
+      }
+
+      function renderCandles(state) {
+        const candles = state.candles || {};
+        candlesBody.innerHTML = Object.values(candles)
+          .map((c) => {
+            const range = c.h - c.l;
+            return `
+              <tr>
+                <td>${c.tf}</td>
+                <td>${formatNum(c.c, 2)}</td>
+                <td>${formatNum(range, 2)}</td>
+                <td>${formatTs(c.ts_end || c.ts_start)}</td>
+              </tr>
+            `;
+          })
+          .join("");
+      }
+
+      function renderRecent(state, type, target, limit) {
+        const events = state.recent_events || [];
+        const items = events.filter((e) => e.type === type).slice(0, limit);
+        if (type === "prediction") {
+          target.innerHTML = items
+            .map((e) => {
+              const p = e.data;
+              return `
+                <tr>
+                  <td>${p.tf}</td>
+                  <td>${p.model_id}</td>
+                  <td>${pill(p.direction)}</td>
+                  <td>${formatPct(p.confidence)}</td>
+                  <td>${formatTs(p.target_ts)}</td>
+                </tr>
+              `;
+            })
+            .join("");
+        }
+        if (type === "update") {
+          target.innerHTML = items
+            .map((e) => {
+              const u = e.data;
+              return `
+                <tr>
+                  <td>${u.tf}</td>
+                  <td>${u.model_id}</td>
+                  <td>${pill(u.pred_dir)}</td>
+                  <td>${pill(u.fact_dir)}</td>
+                  <td>${formatNum(u.reward, 2)}</td>
+                </tr>
+              `;
+            })
+            .join("");
+        }
+      }
+
+      function renderMetrics(state) {
+        const metrics = state.metrics || {};
+        metricsBody.innerHTML = Object.entries(metrics)
+          .map(([key, m]) => {
+            const [tf, model] = key.split(":");
+            return `
+              <tr>
+                <td>${tf || "-"}</td>
+                <td>${model || "-"}</td>
+                <td>${formatPct(m.window_accuracy ?? m.accuracy)}</td>
+                <td>${formatPct(m.window_flat_rate ?? m.flat_rate)}</td>
+                <td>${formatNum(m.window_avg_reward ?? m.avg_reward, 3)}</td>
+              </tr>
+            `;
+          })
+          .join("");
+      }
+
+      async function refresh() {
+        const res = await fetch("/api/state");
+        const state = await res.json();
+        renderSystem(state);
+        renderCandles(state);
+        renderRecent(state, "prediction", predictionsBody, 10);
+        renderRecent(state, "update", updatesBody, 10);
+        renderMetrics(state);
+      }
+
+      refresh();
+      setInterval(refresh, 1000);
+    </script>
+  </body>
+</html>
