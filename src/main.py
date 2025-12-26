@@ -1,10 +1,9 @@
 import argparse
+import os
 import asyncio
 import contextlib
 import logging
 from pathlib import Path
-
-import jax
 
 from .analysis_cycle import AnalysisConfig, PeriodicAnalyzer
 from .bybit_rest import fetch_klines
@@ -25,7 +24,7 @@ from .config import (
     TrainingConfig,
 )
 from .config_manager import ConfigManager
-from .engine import MultiTimeframeEngine
+from .jax_utils import ensure_jax_backend
 from .pattern_store import PatternStore
 from .recording import JsonlRecorder
 from .runtime_state import RuntimeState
@@ -272,9 +271,14 @@ async def run(args: argparse.Namespace) -> None:
         level=args.log_level,
         format="%(asctime)s %(levelname)s %(message)s",
     )
-    logging.info("JAX backend=%s devices=%s", jax.default_backend(), jax.devices())
+    if "TITAN_ENTRYPOINT" not in os.environ:
+        os.environ["TITAN_ENTRYPOINT"] = "src.main"
+    backend, devices = ensure_jax_backend()
+    logging.info("JAX backend=%s devices=%s", backend, devices)
     if args.dry_run:
         return
+
+    from .engine import MultiTimeframeEngine
 
     data_config = DataConfig(
         symbol=args.symbol,
@@ -404,9 +408,7 @@ async def run(args: argparse.Namespace) -> None:
 
     recorder = JsonlRecorder(output.out_dir) if output.out_dir else None
     runtime_state = RuntimeState(history_size=dashboard.history_size)
-    runtime_state.update_jax_info(
-        jax.default_backend(), [str(device) for device in jax.devices()]
-    )
+    runtime_state.update_jax_info(backend, devices)
     config_manager = ConfigManager(feature_config, decision_config, training, lrs, patterns)
 
     analysis = None
