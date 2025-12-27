@@ -266,6 +266,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Print JAX backend/devices and exit",
     )
+    parser.add_argument(
+        "--calib-config",
+        type=str,
+        default=None,
+        help="Path to JSON file with calibration configuration (global + per-model)",
+    )
 
     return parser
 
@@ -351,6 +357,15 @@ async def run(args: argparse.Namespace) -> None:
         perf_lr_baseline=args.perf_lr_baseline,
         perf_lr_min_samples=args.perf_lr_min_samples,
     )
+
+    # Apply calibration config if provided
+    if args.calib_config:
+        from .config import load_calibration_config
+        training = load_calibration_config(args.calib_config, training)
+        logging.info("Loaded calibration config from: %s", args.calib_config)
+        if training.calib_per_model:
+            logging.info("Per-model configs: %s", list(training.calib_per_model.keys()))
+
     lrs = ModelLRConfig(
         lr_trend=args.lr_trend,
         lr_osc=args.lr_osc,

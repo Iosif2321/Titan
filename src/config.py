@@ -1,6 +1,7 @@
 from dataclasses import asdict, dataclass, field, is_dataclass
 from pathlib import Path
 from typing import Any, Dict
+import json
 
 
 def _normalize_config(value: Any) -> Any:
@@ -132,6 +133,38 @@ class ModelInitConfig:
 
 
 @dataclass
+class PerModelCalibConfig:
+    """
+    Per-model calibration configuration overrides.
+    Allows fine-tuning calibration parameters for specific models
+    (e.g., TRENDVIC, OSCILLATOR, VOLUMEMETRIX).
+    """
+
+    # Base calibration parameter overrides
+    lr: float | None = None
+    a_min: float | None = None
+    a_max: float | None = None
+    b_min: float | None = None
+    b_max: float | None = None
+    l2_a: float | None = None
+    l2_b: float | None = None
+
+    # Adaptive lr parameter overrides
+    lr_min: float | None = None
+    lr_max: float | None = None
+    ece_target: float | None = None
+    ece_good_threshold: float | None = None
+    ece_bad_threshold: float | None = None
+    lr_increase_factor: float | None = None
+    lr_decrease_factor: float | None = None
+    adaptation_interval: int | None = None
+
+    # Initial state overrides
+    init_a: float | None = None
+    init_b: float | None = None
+
+
+@dataclass
 class TrainingConfig:
     ema_decay: float = 0.999
     anchor_decay: float = 0.9999
@@ -163,6 +196,21 @@ class TrainingConfig:
     perf_lr_max_mult: float = 1.5
     perf_lr_baseline: float = 0.5
     perf_lr_min_samples: int = 50
+
+    # Adaptive calibration lr defaults
+    calib_lr_min: float = 0.0001
+    calib_lr_max: float = 0.02
+    calib_ece_target: float = 0.05
+    calib_ece_good_threshold: float = 0.10
+    calib_ece_bad_threshold: float = 0.25
+    calib_lr_increase_factor: float = 1.5
+    calib_lr_decrease_factor: float = 0.9
+    calib_adaptation_interval: int = 20
+    calib_min_samples_for_adaptation: int = 30
+    calib_ece_window_size: int = 50
+
+    # Per-model calibration configs
+    calib_per_model: Dict[str, PerModelCalibConfig] = field(default_factory=dict)
 
 
 @dataclass
@@ -245,3 +293,114 @@ class AppConfig:
 
 def config_to_dict(config: AppConfig) -> Dict[str, Any]:
     return _normalize_config(config)
+
+
+def load_calibration_config(
+    config_path: str | Path, base_training: TrainingConfig
+) -> TrainingConfig:
+    """
+    Load calibration configuration from JSON file and apply to TrainingConfig.
+
+    JSON structure:
+    {
+        "global": {
+            "calib_lr": 0.005,
+            "calib_lr_min": 0.0001,
+            "calib_lr_max": 0.02,
+            "calib_ece_target": 0.05,
+            "calib_ece_good_threshold": 0.10,
+            "calib_ece_bad_threshold": 0.25,
+            "calib_lr_increase_factor": 1.5,
+            "calib_lr_decrease_factor": 0.9,
+            "calib_adaptation_interval": 20,
+            "calib_min_samples_for_adaptation": 30,
+            "calib_ece_window_size": 50,
+            "calib_a_min": 0.30,
+            "calib_a_max": 2.0,
+            "calib_b_min": -1.0,
+            "calib_b_max": 1.0,
+            "calib_l2_a": 0.01,
+            "calib_l2_b": 0.001
+        },
+        "per_model": {
+            "OSCILLATOR": {
+                "lr": 0.010,
+                "a_min": 0.15,
+                "a_max": 3.0,
+                "lr_max": 0.04,
+                "ece_target": 0.10,
+                "ece_bad_threshold": 0.35
+            },
+            "VOLUMEMETRIX": {
+                "lr": 0.007,
+                "a_min": 0.25,
+                "ece_target": 0.08
+            }
+        }
+    }
+
+    Args:
+        config_path: Path to JSON config file
+        base_training: Base TrainingConfig to modify
+
+    Returns:
+        Modified TrainingConfig with calibration overrides applied
+    """
+    path = Path(config_path)
+    if not path.exists():
+        raise FileNotFoundError(f"Calibration config not found: {config_path}")
+
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    # Start with a copy of base config
+    from copy import deepcopy
+    config = deepcopy(base_training)
+
+    # Apply global calibration overrides
+    global_overrides = data.get("global", {})
+    for key, value in global_overrides.items():
+        # Skip comments and metadata (keys starting with _)
+        if key.startswith("_"):
+            continue
+
+        if hasattr(config, key):
+            setattr(config, key, value)
+        else:
+            raise ValueError(f"Unknown calibration parameter: {key}")
+
+    # Apply per-model configs
+    per_model_data = data.get("per_model", {})
+    config.calib_per_model = {}
+
+    for model_name, model_overrides in per_model_data.items():
+        # Skip comments and metadata (keys starting with _)
+        if model_name.startswith("_"):
+            continue
+
+        if not isinstance(model_overrides, dict):
+            raise ValueError(f"Per-model config for {model_name} must be a dict")
+
+        # Create PerModelCalibConfig from dict
+        per_model_cfg = PerModelCalibConfig(
+            lr=model_overrides.get("lr"),
+            a_min=model_overrides.get("a_min"),
+            a_max=model_overrides.get("a_max"),
+            b_min=model_overrides.get("b_min"),
+            b_max=model_overrides.get("b_max"),
+            l2_a=model_overrides.get("l2_a"),
+            l2_b=model_overrides.get("l2_b"),
+            lr_min=model_overrides.get("lr_min"),
+            lr_max=model_overrides.get("lr_max"),
+            ece_target=model_overrides.get("ece_target"),
+            ece_good_threshold=model_overrides.get("ece_good_threshold"),
+            ece_bad_threshold=model_overrides.get("ece_bad_threshold"),
+            lr_increase_factor=model_overrides.get("lr_increase_factor"),
+            lr_decrease_factor=model_overrides.get("lr_decrease_factor"),
+            adaptation_interval=model_overrides.get("adaptation_interval"),
+            init_a=model_overrides.get("init_a"),
+            init_b=model_overrides.get("init_b"),
+        )
+        config.calib_per_model[model_name] = per_model_cfg
+
+    return config

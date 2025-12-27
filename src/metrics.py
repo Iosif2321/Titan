@@ -430,6 +430,49 @@ class CalibrationMetrics:
                 self._window_conf_sum_bins[bin_idx] += confidence
                 self._window_abs_ret_sum_bins[bin_idx] += abs_ret_bps
 
+    def get_recent_ece(self, window_size: int = 50) -> float | None:
+        """
+        Calculate ECE (Expected Calibration Error) over recent window.
+
+        This is used for adaptive learning rate feedback. Returns ECE computed
+        over the last window_size samples, or None if insufficient data.
+
+        Args:
+            window_size: Number of recent samples to use (default: 50)
+
+        Returns:
+            ECE over recent window, or None if < window_size samples available
+        """
+        if self._window_total < window_size:
+            return None
+
+        # Get recent samples from deque
+        recent = list(self._window)[-window_size:]
+
+        # Recalculate ECE for window
+        bins = self.bins
+        counts = [0] * bins
+        correct_bins = [0] * bins
+        conf_sum_bins = [0.0] * bins
+
+        for sample in recent:
+            counts[sample.bin_idx] += 1
+            if sample.correct:
+                correct_bins[sample.bin_idx] += 1
+            conf_sum_bins[sample.bin_idx] += sample.confidence
+
+        # Compute ECE
+        ece = 0.0
+        total = len(recent)
+        for idx in range(bins):
+            if counts[idx] > 0:
+                acc = correct_bins[idx] / counts[idx]
+                avg_conf = conf_sum_bins[idx] / counts[idx]
+                err = abs(acc - avg_conf)
+                ece += (counts[idx] / total) * err
+
+        return ece
+
 
 def _bin_index(confidence: float, bins: int) -> int:
     if confidence <= 0.0:

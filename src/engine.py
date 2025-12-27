@@ -158,18 +158,13 @@ class ModelRunner:
         self.pending: Dict[int, PendingPrediction] = {}
         self.metrics = RollingMetrics(metrics_window)
         self.calibration = CalibrationMetrics(training.calibration_bins, metrics_window)
-        init_a, init_b = 1.0, 0.0
-        self.calib_state = AffineLogitCalibState(a=init_a, b=init_b, n=0)
-        self.calib_config = AffineLogitCalibConfig(
-            lr=training.calib_lr,
-            a_min=training.calib_a_min,
-            a_max=training.calib_a_max,
-            b_min=training.calib_b_min,
-            b_max=training.calib_b_max,
-            l2_a=training.calib_l2_a,
-            l2_b=training.calib_l2_b,
-            a_anchor=init_a,
-            b_anchor=init_b,
+
+        # Initialize adaptive calibration controller
+        from .adaptive_calibration import AdaptiveCalibController
+
+        per_model_cfg = training.calib_per_model.get(model_type)
+        self.calib_controller = AdaptiveCalibController.create(
+            model_type=model_type, training_config=training, per_model_config=per_model_cfg
         )
         self.fact_ema = {
             Direction.UP: 1.0 / 3.0,
@@ -214,16 +209,16 @@ class ModelRunner:
             if "rolling" in metrics_state:
                 self.metrics.load_state(metrics_state.get("rolling", {}))
                 self.calibration.load_state(metrics_state.get("calibration", {}))
-                affine_state = metrics_state.get("calibration_affine", {})
-                if isinstance(affine_state, dict):
-                    try:
-                        self.calib_state = AffineLogitCalibState(
-                            a=float(affine_state.get("a", self.calib_state.a)),
-                            b=float(affine_state.get("b", self.calib_state.b)),
-                            n=int(affine_state.get("n", self.calib_state.n)),
-                        )
-                    except (TypeError, ValueError):
-                        pass
+
+                # Load calibration controller state (with backward compatibility)
+                adaptive_state = metrics_state.get("calibration_adaptive")
+                if adaptive_state:
+                    self.calib_controller.load_state(adaptive_state)
+                else:
+                    # Backward compatibility: load from old calibration_affine format
+                    affine_state = metrics_state.get("calibration_affine", {})
+                    if isinstance(affine_state, dict):
+                        self.calib_controller.load_legacy_state(affine_state)
                 fact_ema = metrics_state.get("fact_ema")
                 if isinstance(fact_ema, dict):
                     for key, direction in (
@@ -280,11 +275,10 @@ class ModelRunner:
         )
         if self.direction_flip:
             raw_p_up, raw_p_down = raw_p_down, raw_p_up
-        self._sync_calibration_config()
         p_up, p_down = calibrate_from_logits(
             logit_up,
             logit_down,
-            self.calib_state,
+            self.calib_controller.state,
             flip=self.direction_flip,
         )
         base_flat_delta = self.decision.flat_max_delta
@@ -344,9 +338,9 @@ class ModelRunner:
         lr_eff, anchor_lambda_eff = self._adaptation(trust_dec, prior_win_dec)
         conf_raw = max(raw_p_up, raw_p_down)
         conf_cal = max(p_up, p_down)
-        calib_a = float(self.calib_state.a)
-        calib_b = float(self.calib_state.b)
-        calib_n = int(self.calib_state.n)
+        calib_a = float(self.calib_controller.state.a)
+        calib_b = float(self.calib_controller.state.b)
+        calib_n = int(self.calib_controller.state.n)
         target_ts = candle.start_ts + interval_to_ms(self.tf)
         prediction = Prediction(
             ts=now_ts,
@@ -425,7 +419,6 @@ class ModelRunner:
         pending = self.pending.pop(candle.start_ts, None)
         if pending is None:
             return None
-        self._sync_calibration_config()
         fact_flat_bps = self.fact_config.fact_flat_bps
         if self.fact_controller is not None and self.fact_config.fact_flat_mode == "adaptive":
             fact_flat_bps = self.fact_controller.current_T()
@@ -515,14 +508,14 @@ class ModelRunner:
             y_up = 0.5
             calib_weight = self.training.flat_train_weight
         if self.enable_calibration_update and self.enable_training:
-            self.calib_state = update_affine_calib(
-                self.calib_state,
-                pending.logits_up,
-                pending.logits_down,
+            ece = self.calibration.get_recent_ece(window_size=50)
+            self.calib_controller.update(
+                logit_up=pending.logits_up,
+                logit_down=pending.logits_down,
                 y_up=y_up,
                 weight=calib_weight,
-                cfg=self.calib_config,
                 flip=self.direction_flip,
+                current_ece=ece,
             )
             self._log_calib_health()
         self.last_class_weight = class_weight
@@ -665,11 +658,7 @@ class ModelRunner:
             metrics={
                 "rolling": self.metrics.to_state(),
                 "calibration": self.calibration.to_state(),
-                "calibration_affine": {
-                    "a": float(self.calib_state.a),
-                    "b": float(self.calib_state.b),
-                    "n": int(self.calib_state.n),
-                },
+                "calibration_adaptive": self.calib_controller.to_dict(),
                 "fact_ema": {
                     "UP": self.fact_ema.get(Direction.UP, 0.0),
                     "DOWN": self.fact_ema.get(Direction.DOWN, 0.0),
@@ -690,18 +679,7 @@ class ModelRunner:
     def metrics_snapshot(self) -> Dict[str, object]:
         snapshot = self.metrics.snapshot()
         snapshot["calibration"] = self.calibration.snapshot()
-        snapshot["calibration_affine"] = {
-            "a": float(self.calib_state.a),
-            "b": float(self.calib_state.b),
-            "n": int(self.calib_state.n),
-            "lr": float(self.calib_config.lr),
-            "a_min": float(self.calib_config.a_min),
-            "a_max": float(self.calib_config.a_max),
-            "b_min": float(self.calib_config.b_min),
-            "b_max": float(self.calib_config.b_max),
-            "a_anchor": float(self.calib_config.a_anchor),
-            "b_anchor": float(self.calib_config.b_anchor),
-        }
+        snapshot["calibration_adaptive"] = self.calib_controller.to_dict()
         snapshot["fact_ema"] = {
             "UP": self.fact_ema.get(Direction.UP, 0.0),
             "DOWN": self.fact_ema.get(Direction.DOWN, 0.0),
@@ -711,34 +689,20 @@ class ModelRunner:
         snapshot["perf_lr_mult"] = self.last_perf_mult
         return snapshot
 
-    def _sync_calibration_config(self) -> None:
-        self.calib_config.lr = self.training.calib_lr
-        self.calib_config.a_min = self.training.calib_a_min
-        self.calib_config.a_max = self.training.calib_a_max
-        self.calib_config.b_min = self.training.calib_b_min
-        self.calib_config.b_max = self.training.calib_b_max
-        self.calib_config.l2_a = self.training.calib_l2_a
-        self.calib_config.l2_b = self.training.calib_l2_b
-        self.calib_state = AffineLogitCalibState(
-            a=clamp(self.calib_state.a, self.calib_config.a_min, self.calib_config.a_max),
-            b=clamp(self.calib_state.b, self.calib_config.b_min, self.calib_config.b_max),
-            n=self.calib_state.n,
-        )
-
     def _log_calib_health(self) -> None:
-        if self.calib_state.a <= self.calib_config.a_min + 1e-6:
+        if self.calib_controller.state.a <= self.calib_controller.config.a_min + 1e-6:
             logger.warning(
                 "CALIB_A_AT_FLOOR model=%s tf=%s a=%.4f",
                 self.model_id,
                 self.tf,
-                self.calib_state.a,
+                self.calib_controller.state.a,
             )
-        if abs(self.calib_state.b) >= 0.5:
+        if abs(self.calib_controller.state.b) >= 0.5:
             logger.warning(
                 "CALIB_B_DRIFT model=%s tf=%s b=%.4f",
                 self.model_id,
                 self.tf,
-                self.calib_state.b,
+                self.calib_controller.state.b,
             )
 
     def _class_weight(self, fact_dir: Direction) -> float:
@@ -1029,11 +993,7 @@ class MultiTimeframeEngine:
                             "lr_base": runner.lr_base,
                             "updates": runner.update_count,
                             "metrics": metrics_payload,
-                            "calibration_affine": {
-                                "a": float(runner.calib_state.a),
-                                "b": float(runner.calib_state.b),
-                                "n": int(runner.calib_state.n),
-                            },
+                            "calibration_adaptive": runner.calib_controller.to_dict(),
                             "perf_lr_mult": runner.last_perf_mult,
                             "last_class_weight": runner.last_class_weight,
                         },
