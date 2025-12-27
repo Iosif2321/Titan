@@ -488,6 +488,12 @@ class ModelRunner:
             self._log_calib_health()
         self.last_class_weight = class_weight
         self.update_count += 1
+        margin_raw = abs(pending.p_up_raw - pending.p_down_raw)
+        margin_cal = abs(pending.p_up - pending.p_down)
+        close_prev = pending.close_prev
+        close_curr = candle.close
+        delta = close_curr - close_prev
+        features = pending.features.tolist() if pending.features is not None else None
 
         update_event = UpdateEvent(
             ts=now_ts,
@@ -511,6 +517,19 @@ class ModelRunner:
                 "anchor": weight_norms(self.model.anchor_params),
             },
             anchor_update_applied=allow_anchor_update,
+            calib_a=pending.calib_a,
+            calib_b=pending.calib_b,
+            calib_n=pending.calib_n,
+            p_up_raw=pending.p_up_raw,
+            p_down_raw=pending.p_down_raw,
+            p_up_cal=pending.p_up,
+            p_down_cal=pending.p_down,
+            margin_raw=margin_raw,
+            margin_cal=margin_cal,
+            close_prev=close_prev,
+            close_curr=close_curr,
+            delta=delta,
+            features=features,
             notes="",
             meta={
                 "reward_reason": reward_reason,

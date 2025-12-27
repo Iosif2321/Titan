@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 
 
 class Direction(str, Enum):
@@ -111,5 +111,18 @@ class UpdateEvent:
     anchor_lambda_eff: float
     weight_norms: Dict[str, float]
     anchor_update_applied: bool
+    calib_a: Optional[float] = None
+    calib_b: Optional[float] = None
+    calib_n: Optional[int] = None
+    p_up_raw: Optional[float] = None
+    p_down_raw: Optional[float] = None
+    p_up_cal: Optional[float] = None
+    p_down_cal: Optional[float] = None
+    margin_raw: Optional[float] = None
+    margin_cal: Optional[float] = None
+    close_prev: Optional[float] = None
+    close_curr: Optional[float] = None
+    delta: Optional[float] = None
+    features: Optional[List[float]] = None
     notes: str = ""
     meta: Dict[str, Any] = field(default_factory=dict)
