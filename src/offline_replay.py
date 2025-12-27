@@ -174,6 +174,12 @@ class OfflineStats:
         self.calib_n_history: List[int] = []
         self.collapse_step: Optional[int] = None
         self.flat_reasons: Dict[str, int] = {}
+        self.fact_flat_bps_sum = 0.0
+        self.fact_flat_bps_count = 0
+        self.pred_flat_delta_sum = 0.0
+        self.pred_flat_delta_count = 0
+        self.x_ret_sum = 0.0
+        self.x_ret_count = 0
         self.confident_wrong = 0
         self.confident_wrong_examples: List[ConfidentExample] = []
         self.lr_eff_sum = 0.0
@@ -228,6 +234,15 @@ class OfflineStats:
             reason = _flat_reason(update, self.flat_max_delta)
             if reason:
                 self.flat_reasons[reason] = self.flat_reasons.get(reason, 0) + 1
+        if update.fact_flat_bps is not None:
+            self.fact_flat_bps_sum += float(update.fact_flat_bps)
+            self.fact_flat_bps_count += 1
+        if update.pred_flat_delta is not None:
+            self.pred_flat_delta_sum += float(update.pred_flat_delta)
+            self.pred_flat_delta_count += 1
+        if update.x_ret is not None:
+            self.x_ret_sum += float(update.x_ret)
+            self.x_ret_count += 1
         self.conf_sum += update.pred_conf
         if update.pred_conf >= CONFIDENT_WRONG_THRESHOLD and not correct:
             self.confident_wrong += 1
@@ -302,6 +317,15 @@ class OfflineStats:
         )
         avg_conf = self.conf_sum / total if total else 0.0
         calib = self.calibration.snapshot()
+        fact_flat_bps_avg = (
+            self.fact_flat_bps_sum / self.fact_flat_bps_count if self.fact_flat_bps_count else None
+        )
+        pred_flat_delta_avg = (
+            self.pred_flat_delta_sum / self.pred_flat_delta_count
+            if self.pred_flat_delta_count
+            else None
+        )
+        x_ret_avg = self.x_ret_sum / self.x_ret_count if self.x_ret_count else None
         calibration_evolution = None
         if self.calib_a_history:
             b_history = self.calib_b_history
@@ -333,6 +357,9 @@ class OfflineStats:
             "coverage": coverage,
             "action_accuracy": action_accuracy,
             "flat_when_fact_nonflat_rate": flat_when_fact_nonflat_rate,
+            "fact_flat_bps_avg": fact_flat_bps_avg,
+            "pred_flat_delta_avg": pred_flat_delta_avg,
+            "x_ret_avg": x_ret_avg,
             "avg_conf": avg_conf,
             "confusion": self.confusion,
             "pred_dir_counts": self.pred_dir_counts,
@@ -724,6 +751,26 @@ def _write_report(run_dir: Path, summary: Dict[str, object]) -> None:
     lines.append(f"- range: {run.get('start')} -> {run.get('end')}")
     if run.get("fact_flat_bps") is not None:
         lines.append(f"- fact_flat_bps: {run.get('fact_flat_bps')}")
+    if run.get("fact_flat_mode"):
+        lines.append(
+            f"- fact_flat_mode: {run.get('fact_flat_mode')} "
+            f"target={_fmt_optional(run.get('fact_flat_target_lo'))}-"
+            f"{_fmt_optional(run.get('fact_flat_target_hi'))} "
+            f"bps_range={_fmt_optional(run.get('fact_flat_bps_min'))}-"
+            f"{_fmt_optional(run.get('fact_flat_bps_max'))} "
+            f"current={_fmt_map(run.get('fact_flat_current'))}"
+        )
+    if run.get("pred_flat_mode"):
+        lines.append(
+            f"- pred_flat_mode: {run.get('pred_flat_mode')} "
+            f"target={_fmt_optional(run.get('pred_flat_target_lo'))}-"
+            f"{_fmt_optional(run.get('pred_flat_target_hi'))} "
+            f"delta_range={_fmt_optional(run.get('pred_flat_delta_min'))}-"
+            f"{_fmt_optional(run.get('pred_flat_delta_max'))} "
+            f"current={_fmt_map(run.get('pred_flat_delta_final'))}"
+        )
+    if run.get("reward_mode"):
+        lines.append(f"- reward_mode: {run.get('reward_mode')}")
     lines.append(f"- candles: {run.get('candles_total')}")
     counts = summary.get("counts", {})
     lines.append(
@@ -927,6 +974,19 @@ def _fmt_optional(value: object, precision: int = 3) -> str:
         return str(value)
 
 
+def _fmt_map(value: object, precision: int = 4) -> str:
+    if isinstance(value, dict):
+        parts: List[str] = []
+        for key in sorted(value.keys()):
+            item = value[key]
+            if isinstance(item, (float, int)):
+                parts.append(f"{key}={item:.{precision}f}")
+            else:
+                parts.append(f"{key}={item}")
+        return ", ".join(parts)
+    return _fmt_optional(value, precision=precision)
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Offline replay for BTCUSDT predictor")
     parser.add_argument("--symbol", default="BTCUSDT")
@@ -950,6 +1010,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-anchor", action="store_true")
     parser.add_argument("--no-ema", action="store_true")
     parser.add_argument("--fact-flat-bps", type=float, default=FactConfig().fact_flat_bps)
+    parser.add_argument("--fact-flat-mode", choices=["fixed", "adaptive"], default="fixed")
+    parser.add_argument("--fact-flat-target-lo", type=float, default=FactConfig().fact_flat_target_lo)
+    parser.add_argument("--fact-flat-target-hi", type=float, default=FactConfig().fact_flat_target_hi)
+    parser.add_argument("--fact-flat-window", type=int, default=FactConfig().fact_flat_window)
+    parser.add_argument("--fact-flat-p-start", type=float, default=FactConfig().fact_flat_p_start)
+    parser.add_argument("--fact-flat-bps-min", type=float, default=FactConfig().fact_flat_bps_min)
+    parser.add_argument("--fact-flat-bps-max", type=float, default=FactConfig().fact_flat_bps_max)
+    parser.add_argument("--pred-flat-mode", choices=["fixed", "adaptive"], default="fixed")
+    parser.add_argument("--pred-flat-target-lo", type=float, default=DecisionConfig().pred_flat_target_lo)
+    parser.add_argument("--pred-flat-target-hi", type=float, default=DecisionConfig().pred_flat_target_hi)
+    parser.add_argument("--reward-mode", choices=["classic", "shaped"], default="classic")
     parser.add_argument("--candles-jsonl", default=None)
     parser.add_argument("--log-level", default="INFO")
     parser.add_argument("--strict", action="store_true", help="Treat guard warnings as errors")
@@ -1023,8 +1094,20 @@ def main() -> None:
 
     feature_config = FeatureConfig()
     decision_config = DecisionConfig()
-    fact_config = FactConfig(fact_flat_bps=args.fact_flat_bps)
-    reward_config = RewardConfig()
+    decision_config.pred_flat_mode = args.pred_flat_mode
+    decision_config.pred_flat_target_lo = args.pred_flat_target_lo
+    decision_config.pred_flat_target_hi = args.pred_flat_target_hi
+    fact_config = FactConfig(
+        fact_flat_mode=args.fact_flat_mode,
+        fact_flat_bps=args.fact_flat_bps,
+        fact_flat_window=args.fact_flat_window,
+        fact_flat_target_lo=args.fact_flat_target_lo,
+        fact_flat_target_hi=args.fact_flat_target_hi,
+        fact_flat_p_start=args.fact_flat_p_start,
+        fact_flat_bps_min=args.fact_flat_bps_min,
+        fact_flat_bps_max=args.fact_flat_bps_max,
+    )
+    reward_config = RewardConfig(reward_mode=args.reward_mode)
     model_config = ModelConfig()
     training = TrainingConfig()
     model_init = ModelInitConfig()
@@ -1139,6 +1222,11 @@ def main() -> None:
                 "close_prev",
                 "close_curr",
                 "delta",
+                "fact_flat_bps",
+                "abs_ret_bps",
+                "x_ret",
+                "pred_flat_delta",
+                "micro_share",
                 "flat_reason",
             ]
         )
@@ -1188,6 +1276,11 @@ def main() -> None:
                     update.close_prev,
                     update.close_curr,
                     update.delta,
+                    update.fact_flat_bps,
+                    update.abs_ret_bps,
+                    update.x_ret,
+                    update.pred_flat_delta,
+                    update.micro_share,
                     flat_reason,
                 ]
             )
@@ -1304,6 +1397,25 @@ def main() -> None:
     if stop_reason:
         warnings.append(stop_reason)
 
+    if fact_config.fact_flat_mode == "adaptive":
+        fact_flat_current = {
+            tf: engine.flat_fact_controllers[tf].current_T()
+            if tf in engine.flat_fact_controllers
+            else fact_config.fact_flat_bps
+            for tf in tfs
+        }
+    else:
+        fact_flat_current = {tf: fact_config.fact_flat_bps for tf in tfs}
+    if decision_config.pred_flat_mode == "adaptive":
+        pred_flat_delta_final = {
+            tf: engine.flat_pred_controllers[tf].delta
+            if tf in engine.flat_pred_controllers
+            else decision_config.flat_max_delta
+            for tf in tfs
+        }
+    else:
+        pred_flat_delta_final = {tf: decision_config.flat_max_delta for tf in tfs}
+
     summary = {
         "run": {
             "symbol": args.symbol,
@@ -1314,6 +1426,19 @@ def main() -> None:
             "candles_total": len(merged),
             "run_dir": str(run_dir),
             "fact_flat_bps": fact_config.fact_flat_bps,
+            "fact_flat_mode": fact_config.fact_flat_mode,
+            "fact_flat_target_lo": fact_config.fact_flat_target_lo,
+            "fact_flat_target_hi": fact_config.fact_flat_target_hi,
+            "fact_flat_bps_min": fact_config.fact_flat_bps_min,
+            "fact_flat_bps_max": fact_config.fact_flat_bps_max,
+            "fact_flat_current": fact_flat_current,
+            "pred_flat_mode": decision_config.pred_flat_mode,
+            "pred_flat_target_lo": decision_config.pred_flat_target_lo,
+            "pred_flat_target_hi": decision_config.pred_flat_target_hi,
+            "pred_flat_delta_min": decision_config.pred_flat_delta_min,
+            "pred_flat_delta_max": decision_config.pred_flat_delta_max,
+            "pred_flat_delta_final": pred_flat_delta_final,
+            "reward_mode": reward_config.reward_mode,
             "stopped_early": bool(stop_reason),
             "stop_reason": stop_reason,
             "stop_step": stop_step,

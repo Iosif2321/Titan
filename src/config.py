@@ -64,6 +64,14 @@ class FeatureConfig:
 class DecisionConfig:
     flat_max_prob: float = 0.55
     flat_max_delta: float = 0.02
+    pred_flat_mode: str = "fixed"
+    pred_flat_target_lo: float = 0.05
+    pred_flat_target_hi: float = 0.15
+    pred_flat_delta_min: float = 0.01
+    pred_flat_delta_max: float = 0.08
+    pred_flat_adjust_rate: float = 0.05
+    pred_flat_ema_decay: float = 0.02
+    pred_flat_min_action_acc: float = 0.45
     use_context_priors: bool = True
     context_trust_min: float = 0.15
     context_flat_gain: float = 0.12
@@ -74,7 +82,20 @@ class DecisionConfig:
 
 @dataclass
 class FactConfig:
-    fact_flat_bps: float = 1.0
+    fact_flat_mode: str = "fixed"
+    fact_flat_bps: float = 0.20
+    fact_flat_window: int = 300
+    fact_flat_update_every: int = 20
+    fact_flat_min_samples: int = 50
+    fact_flat_target_lo: float = 0.10
+    fact_flat_target_hi: float = 0.25
+    fact_flat_p_start: float = 0.15
+    fact_flat_p_step: float = 0.02
+    fact_flat_p_min: float = 0.02
+    fact_flat_p_max: float = 0.35
+    fact_flat_bps_min: float = 0.01
+    fact_flat_bps_max: float = 0.25
+    fact_flat_smooth_beta: float = 0.20
 
 
 @dataclass
@@ -83,6 +104,23 @@ class RewardConfig:
     reward_wrong_dir: float = -1.0
     reward_flat_miss: float = -0.5
     reward_dir_in_flat: float = -0.5
+    reward_mode: str = "classic"
+    shaped_R_max: float = 6.0
+    shaped_R_big: float = 1.0
+    shaped_alpha: float = 0.70
+    shaped_x_cap: float = 6.0
+    shaped_wrong_near: float = -1.0
+    shaped_wrong_far: float = -1.5
+    shaped_flat_miss_near: float = -0.6
+    shaped_flat_miss_far: float = -1.2
+    shaped_flat_correct: float = 0.10
+    shaped_dir_in_flat_base: float = -0.25
+    shaped_dir_in_flat_slope: float = -0.55
+    shaped_micro_x_max: float = 1.20
+    shaped_micro_share_thr: float = 0.55
+    shaped_micro_scale: float = 0.70
+    shaped_reward_clip_min: float = -2.0
+    shaped_reward_clip_max: float = 6.0
 
 
 @dataclass

@@ -4,6 +4,7 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 import logging
+import math
 
 import jax
 import jax.numpy as jnp
@@ -24,6 +25,11 @@ from .config import (
     ModelLRConfig,
     RewardConfig,
     TrainingConfig,
+)
+from .flat_adaptation import (
+    AdaptiveFactFlatController,
+    AdaptivePredFlatController,
+    MicroShareTracker,
 )
 from .features import FeatureBuilder, FeatureBundle, MODEL_OSC, MODEL_TREND, MODEL_VOL
 from .metrics import CalibrationMetrics, RollingMetrics
@@ -126,6 +132,9 @@ class ModelRunner:
         state_store: ModelStateStore,
         metrics_window: int = 200,
         runner_config: RunnerConfig | None = None,
+        fact_controller: AdaptiveFactFlatController | None = None,
+        pred_controller: AdaptivePredFlatController | None = None,
+        micro_tracker: MicroShareTracker | None = None,
     ) -> None:
         config = runner_config or RunnerConfig()
         self.tf = tf
@@ -171,6 +180,9 @@ class ModelRunner:
         self.last_perf_mult = 1.0
         self.update_count = 0
         self.last_save_ts = 0
+        self.fact_controller = fact_controller
+        self.pred_controller = pred_controller
+        self.micro_tracker = micro_tracker
         self.model = OnlineModel(
             input_size=feature_builder.spec.input_size,
             init_config=model_init,
@@ -275,11 +287,14 @@ class ModelRunner:
             self.calib_state,
             flip=self.direction_flip,
         )
+        base_flat_delta = self.decision.flat_max_delta
+        if self.pred_controller is not None and self.decision.pred_flat_mode == "adaptive":
+            base_flat_delta = self.pred_controller.delta
         base_dir = decide_direction(
             p_up,
             p_down,
             self.decision.flat_max_prob,
-            self.decision.flat_max_delta,
+            base_flat_delta,
         )
 
         if self.use_patterns:
@@ -293,7 +308,7 @@ class ModelRunner:
                 trust_ctx,
                 prior_ctx,
                 self.decision.flat_max_prob,
-                self.decision.flat_max_delta,
+                base_flat_delta,
             )
         else:
             decision_key_used = f"{context_key_used}|PRED={base_dir.value}"
@@ -301,7 +316,7 @@ class ModelRunner:
             prior_win_dec = 0.5
             anti_pattern = False
             flat_max_prob = self.decision.flat_max_prob
-            flat_max_delta = self.decision.flat_max_delta
+            flat_max_delta = base_flat_delta
         notes: List[str] = []
         final_dir = base_dir
         if anti_pattern and base_dir != Direction.FLAT and self.use_patterns:
@@ -357,7 +372,7 @@ class ModelRunner:
                 "flat_max_prob": flat_max_prob,
                 "flat_max_delta": flat_max_delta,
                 "base_flat_max_prob": self.decision.flat_max_prob,
-                "base_flat_max_delta": self.decision.flat_max_delta,
+                "base_flat_max_delta": base_flat_delta,
             },
             notes=",".join(notes),
             meta={
@@ -411,17 +426,35 @@ class ModelRunner:
         if pending is None:
             return None
         self._sync_calibration_config()
+        fact_flat_bps = self.fact_config.fact_flat_bps
+        if self.fact_controller is not None and self.fact_config.fact_flat_mode == "adaptive":
+            fact_flat_bps = self.fact_controller.current_T()
         fact = fact_from_prices(
             tf=self.tf,
             prev_ts=pending.candle_ts,
             curr_ts=candle.start_ts,
             close_prev=pending.close_prev,
             close_curr=candle.close,
-            fact_flat_bps=self.fact_config.fact_flat_bps,
+            fact_flat_bps=fact_flat_bps,
         )
+        abs_ret_bps = abs(fact.ret_bps)
+        if self.fact_controller is not None and self.fact_config.fact_flat_mode == "adaptive":
+            self.fact_controller.observe(abs_ret_bps, candle.start_ts)
+        x_ret = abs_ret_bps / max(fact_flat_bps, 1e-9) if fact_flat_bps > 0 else None
         reward, reward_reason, reward_base, flat_penalty = reward_from_dirs(
             pending.pred_dir, fact.direction, self.reward_config
         )
+        reward_raw = None
+        micro_share = None
+        if self.reward_config.reward_mode == "shaped":
+            reward, reward_raw, micro_share = reward_shaped(
+                pred_dir=pending.pred_dir,
+                fact_dir=fact.direction,
+                abs_ret_bps=abs_ret_bps,
+                fact_flat_bps=fact_flat_bps,
+                reward_config=self.reward_config,
+                micro_tracker=self.micro_tracker,
+            )
         class_weight = self._class_weight(fact.direction)
         sample_weight = self.training.flat_train_weight if fact.direction == Direction.FLAT else 1.0
         sample_weight *= class_weight
@@ -465,6 +498,12 @@ class ModelRunner:
                 pending.pred_dir == fact.direction,
                 abs(fact.ret_bps),
             )
+        if self.pred_controller is not None:
+            self.pred_controller.update(
+                pending.pred_dir,
+                fact.direction,
+                allow_adjust=self.decision.pred_flat_mode == "adaptive",
+            )
         calib_weight = 1.0
         if fact.direction == Direction.UP:
             y_up = 1.0
@@ -494,6 +533,8 @@ class ModelRunner:
         close_curr = candle.close
         delta = close_curr - close_prev
         features = pending.features.tolist() if pending.features is not None else None
+        if reward_raw is None:
+            reward_raw = reward
 
         update_event = UpdateEvent(
             ts=now_ts,
@@ -530,6 +571,12 @@ class ModelRunner:
             close_curr=close_curr,
             delta=delta,
             features=features,
+            fact_flat_bps=fact_flat_bps,
+            abs_ret_bps=abs_ret_bps,
+            x_ret=x_ret,
+            pred_flat_delta=pending.flat_max_delta,
+            reward_raw=reward_raw,
+            micro_share=micro_share,
             notes="",
             meta={
                 "reward_reason": reward_reason,
@@ -630,6 +677,13 @@ class ModelRunner:
                 },
             },
         )
+        if self.fact_controller is not None or self.pred_controller is not None or self.micro_tracker is not None:
+            flat_payload = {
+                "fact": self.fact_controller.to_dict() if self.fact_controller is not None else None,
+                "pred": self.pred_controller.to_dict() if self.pred_controller is not None else None,
+                "micro": self.micro_tracker.to_dict() if self.micro_tracker is not None else None,
+            }
+            self.state_store.save_flat_state(f"flat_state_tf_{self.tf}", flat_payload, now_ts)
         self.last_save_ts = now_ts
         return True
 
@@ -832,8 +886,20 @@ class MultiTimeframeEngine:
         self.buffers: Dict[str, CandleBuffer] = {}
         self.last_processed_ts: Dict[str, int] = {}
         self.feature_config = feature_config
+        self.fact_config = fact_config
+        self.decision = decision
+        self.reward_config = reward_config
+        self.flat_fact_controllers: Dict[str, AdaptiveFactFlatController] = {}
+        self.flat_pred_controllers: Dict[str, AdaptivePredFlatController] = {}
+        self.micro_trackers: Dict[str, MicroShareTracker] = {}
 
         for tf in tfs:
+            fact_controller = AdaptiveFactFlatController(fact_config)
+            pred_controller = AdaptivePredFlatController(decision)
+            micro_tracker = MicroShareTracker(decision.pred_flat_ema_decay)
+            self.flat_fact_controllers[tf] = fact_controller
+            self.flat_pred_controllers[tf] = pred_controller
+            self.micro_trackers[tf] = micro_tracker
             builders = {
                 MODEL_TREND: FeatureBuilder(feature_config, MODEL_TREND),
                 MODEL_OSC: FeatureBuilder(feature_config, MODEL_OSC),
@@ -856,6 +922,9 @@ class MultiTimeframeEngine:
                     pattern_store=pattern_store,
                     state_store=state_store,
                     runner_config=runner_config,
+                    fact_controller=fact_controller,
+                    pred_controller=pred_controller,
+                    micro_tracker=micro_tracker,
                 ),
                 ModelRunner(
                     tf=tf,
@@ -871,6 +940,9 @@ class MultiTimeframeEngine:
                     pattern_store=pattern_store,
                     state_store=state_store,
                     runner_config=runner_config,
+                    fact_controller=fact_controller,
+                    pred_controller=pred_controller,
+                    micro_tracker=micro_tracker,
                 ),
                 ModelRunner(
                     tf=tf,
@@ -886,6 +958,9 @@ class MultiTimeframeEngine:
                     pattern_store=pattern_store,
                     state_store=state_store,
                     runner_config=runner_config,
+                    fact_controller=fact_controller,
+                    pred_controller=pred_controller,
+                    micro_tracker=micro_tracker,
                 ),
             ]
 
@@ -983,6 +1058,25 @@ class MultiTimeframeEngine:
 
     def load_states(self) -> None:
         for tf, runners in self.runners.items():
+            flat_payload = self.state_store.load_flat_state(f"flat_state_tf_{tf}")
+            if isinstance(flat_payload, dict):
+                fact_payload = flat_payload.get("fact") if isinstance(flat_payload.get("fact"), dict) else None
+                pred_payload = flat_payload.get("pred") if isinstance(flat_payload.get("pred"), dict) else None
+                micro_payload = (
+                    flat_payload.get("micro") if isinstance(flat_payload.get("micro"), dict) else None
+                )
+                fact_controller = AdaptiveFactFlatController.from_dict(self.fact_config, fact_payload)
+                pred_controller = AdaptivePredFlatController.from_dict(self.decision, pred_payload)
+                micro_tracker = MicroShareTracker.from_dict(
+                    self.decision.pred_flat_ema_decay, micro_payload
+                )
+                self.flat_fact_controllers[tf] = fact_controller
+                self.flat_pred_controllers[tf] = pred_controller
+                self.micro_trackers[tf] = micro_tracker
+                for runner in runners:
+                    runner.fact_controller = fact_controller
+                    runner.pred_controller = pred_controller
+                    runner.micro_tracker = micro_tracker
             for runner in runners:
                 state = self.state_store.load_latest(runner.model_id, tf)
                 if state is None:
@@ -1081,6 +1175,71 @@ def reward_from_dirs(
         return base, "flat_miss", base, 0.0
     base = reward_config.reward_wrong_dir
     return base, "wrong_dir", base, 0.0
+
+
+def reward_shaped(
+    *,
+    pred_dir: Direction,
+    fact_dir: Direction,
+    abs_ret_bps: float,
+    fact_flat_bps: float,
+    reward_config: RewardConfig,
+    micro_tracker: MicroShareTracker | None,
+) -> tuple[float, float, Optional[float]]:
+    x = abs_ret_bps / max(fact_flat_bps, 1e-9)
+    x_cap = max(reward_config.shaped_x_cap, 1.0)
+    if x > 1.0 and x_cap > 1.0:
+        s = clamp((x - 1.0) / (x_cap - 1.0), 0.0, 1.0)
+    else:
+        s = 0.0
+
+    reward = 0.0
+    if fact_dir in (Direction.UP, Direction.DOWN):
+        if pred_dir == fact_dir:
+            if 1.0 <= x <= x_cap:
+                reward = reward_config.shaped_R_big + (
+                    reward_config.shaped_R_max - reward_config.shaped_R_big
+                ) * math.exp(-reward_config.shaped_alpha * (x - 1.0))
+            else:
+                reward = reward_config.shaped_R_big
+        elif pred_dir == Direction.FLAT:
+            reward = reward_config.shaped_flat_miss_near + (
+                reward_config.shaped_flat_miss_far - reward_config.shaped_flat_miss_near
+            ) * s
+        else:
+            reward = reward_config.shaped_wrong_near + (
+                reward_config.shaped_wrong_far - reward_config.shaped_wrong_near
+            ) * s
+    else:
+        if pred_dir == Direction.FLAT:
+            reward = reward_config.shaped_flat_correct
+        else:
+            reward = reward_config.shaped_dir_in_flat_base + reward_config.shaped_dir_in_flat_slope * min(
+                x, 1.0
+            )
+
+    micro_share = None
+    if (
+        micro_tracker is not None
+        and pred_dir != Direction.FLAT
+        and fact_dir != Direction.FLAT
+    ):
+        micro = 1.0 if 1.0 <= x <= reward_config.shaped_micro_x_max else 0.0
+        micro_share = micro_tracker.update(micro, 1.0)
+        if (
+            micro_share > reward_config.shaped_micro_share_thr
+            and pred_dir == fact_dir
+            and 1.0 <= x <= reward_config.shaped_micro_x_max
+        ):
+            reward *= reward_config.shaped_micro_scale
+
+    reward_raw = reward
+    reward = clamp(
+        reward,
+        reward_config.shaped_reward_clip_min,
+        reward_config.shaped_reward_clip_max,
+    )
+    return reward, reward_raw, micro_share
 
 
 def target_vector(direction: Direction, flip: bool = False) -> np.ndarray:

@@ -124,5 +124,11 @@ class UpdateEvent:
     close_curr: Optional[float] = None
     delta: Optional[float] = None
     features: Optional[List[float]] = None
+    fact_flat_bps: Optional[float] = None
+    abs_ret_bps: Optional[float] = None
+    x_ret: Optional[float] = None
+    pred_flat_delta: Optional[float] = None
+    reward_raw: Optional[float] = None
+    micro_share: Optional[float] = None
     notes: str = ""
     meta: Dict[str, Any] = field(default_factory=dict)

@@ -54,6 +54,15 @@ class ModelStateStore:
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_model_state_latest ON model_state(model_id, tf, version)"
         )
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS flat_state (
+              key TEXT PRIMARY KEY,
+              json TEXT,
+              updated_at INTEGER
+            )
+            """
+        )
         self.conn.commit()
 
     def close(self) -> None:
@@ -134,6 +143,32 @@ class ModelStateStore:
             opt_state=opt_state,
             metrics=metrics,
         )
+
+    def save_flat_state(self, key: str, payload: Dict[str, object], updated_at: int) -> None:
+        payload_json = json.dumps(payload, separators=(",", ":"))
+        self.conn.execute("BEGIN")
+        self.conn.execute(
+            """
+            INSERT INTO flat_state (key, json, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET
+              json=excluded.json,
+              updated_at=excluded.updated_at
+            """,
+            (key, payload_json, updated_at),
+        )
+        self.conn.execute("COMMIT")
+
+    def load_flat_state(self, key: str) -> Optional[Dict[str, object]]:
+        cur = self.conn.execute("SELECT json FROM flat_state WHERE key = ?", (key,))
+        row = cur.fetchone()
+        if row is None:
+            return None
+        raw = row["json"] or "{}"
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            return None
 
 
 def _pack_arrays(values: Dict[str, np.ndarray]) -> bytes:

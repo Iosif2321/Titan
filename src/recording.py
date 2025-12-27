@@ -93,6 +93,7 @@ class JsonlRecorder:
                 "close_prev": fact.close_prev,
                 "close_curr": fact.close_curr,
                 "ret_bps": fact.ret_bps,
+                "abs_ret_bps": abs(fact.ret_bps),
                 "fact_flat_bps": fact.fact_flat_bps,
                 "fact_dir": fact.direction.value,
             }
@@ -130,6 +131,12 @@ class JsonlRecorder:
             "close_curr": update.close_curr,
             "delta": update.delta,
             "features": update.features,
+            "fact_flat_bps": update.fact_flat_bps,
+            "abs_ret_bps": update.abs_ret_bps,
+            "x_ret": update.x_ret,
+            "pred_flat_delta": update.pred_flat_delta,
+            "reward_raw": update.reward_raw,
+            "micro_share": update.micro_share,
             "notes": update.notes,
             "meta": update.meta,
         }
