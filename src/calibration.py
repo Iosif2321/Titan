@@ -30,21 +30,26 @@ class AffineLogitCalibState:
 
 @dataclass
 class AffineLogitCalibConfig:
-    lr: float = 0.01
-    a_min: float = 0.05
+    lr: float = 0.005
+    a_min: float = 0.30
     a_max: float = 2.0
     b_min: float = -1.0
     b_max: float = 1.0
-    l2_a: float = 1e-4
-    l2_b: float = 1e-4
+    l2_a: float = 0.01
+    l2_b: float = 0.001
     a_anchor: float = 1.0
     b_anchor: float = 0.0
 
 
 def calibrate_from_logits(
-    logit_up: float, logit_down: float, st: AffineLogitCalibState
+    logit_up: float,
+    logit_down: float,
+    st: AffineLogitCalibState,
+    flip: bool = False,
 ) -> Tuple[float, float]:
     m = logit_up - logit_down
+    if flip:
+        m = -m
     m_cal = st.a * m + st.b
     p_up = _sigmoid(m_cal)
     return p_up, 1.0 - p_up
@@ -57,8 +62,11 @@ def update_affine_calib(
     y_up: float,
     weight: float,
     cfg: AffineLogitCalibConfig,
+    flip: bool = False,
 ) -> AffineLogitCalibState:
     m = logit_up - logit_down
+    if flip:
+        m = -m
     m_cal = st.a * m + st.b
     p_up = _sigmoid(m_cal)
 

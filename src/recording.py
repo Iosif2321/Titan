@@ -93,6 +93,7 @@ class JsonlRecorder:
                 "close_prev": fact.close_prev,
                 "close_curr": fact.close_curr,
                 "ret_bps": fact.ret_bps,
+                "fact_flat_bps": fact.fact_flat_bps,
                 "fact_dir": fact.direction.value,
             }
         )

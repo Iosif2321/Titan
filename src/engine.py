@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass
 from typing import Dict, List, Optional
+import logging
 
 import jax
 import jax.numpy as jnp
@@ -14,7 +15,16 @@ from .calibration import (
     calibrate_from_logits,
     update_affine_calib,
 )
-from .config import DecisionConfig, FeatureConfig, ModelInitConfig, ModelLRConfig, TrainingConfig
+from .config import (
+    DecisionConfig,
+    FactConfig,
+    FeatureConfig,
+    ModelConfig,
+    ModelInitConfig,
+    ModelLRConfig,
+    RewardConfig,
+    TrainingConfig,
+)
 from .features import FeatureBuilder, FeatureBundle, MODEL_OSC, MODEL_TREND, MODEL_VOL
 from .metrics import CalibrationMetrics, RollingMetrics
 from .model import weight_norms
@@ -25,11 +35,7 @@ from .state_store import ModelStateStore
 from .types import Candle, Direction, Fact, Prediction, UpdateEvent
 from .utils import clamp, interval_to_ms, now_ms
 
-_CALIB_INIT = {
-    MODEL_TREND: (0.50, 0.00),
-    MODEL_OSC: (0.20, 0.00),
-    MODEL_VOL: (0.20, 0.10),
-}
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -54,7 +60,8 @@ class PendingPrediction:
     trust_dec: float
     prior_ctx: Dict[str, float]
     prior_win_dec: float
-    flat_margin: float
+    flat_max_prob: float
+    flat_max_delta: float
     lr_eff: float
     anchor_lambda_eff: float
     anti_pattern: bool
@@ -109,6 +116,9 @@ class ModelRunner:
         model_type: str,
         feature_builder: FeatureBuilder,
         model_init: ModelInitConfig,
+        fact_config: FactConfig,
+        reward_config: RewardConfig,
+        model_config: ModelConfig,
         training: TrainingConfig,
         decision: DecisionConfig,
         lr_base: float,
@@ -122,6 +132,9 @@ class ModelRunner:
         self.model_type = model_type
         self.model_id = model_type
         self.feature_builder = feature_builder
+        self.fact_config = fact_config
+        self.reward_config = reward_config
+        self.direction_flip = bool(model_config.direction_flip_by_model.get(model_type, False))
         self.training = training
         self.decision = decision
         self.lr_base = lr_base
@@ -136,7 +149,7 @@ class ModelRunner:
         self.pending: Dict[int, PendingPrediction] = {}
         self.metrics = RollingMetrics(metrics_window)
         self.calibration = CalibrationMetrics(training.calibration_bins, metrics_window)
-        init_a, init_b = _CALIB_INIT.get(model_type, (1.0, 0.0))
+        init_a, init_b = 1.0, 0.0
         self.calib_state = AffineLogitCalibState(a=init_a, b=init_b, n=0)
         self.calib_config = AffineLogitCalibConfig(
             lr=training.calib_lr,
@@ -253,9 +266,21 @@ class ModelRunner:
         logit_up, logit_down, raw_p_up, raw_p_down = self.model.predict(
             bundle.values, use_ema=self.use_ema
         )
+        if self.direction_flip:
+            raw_p_up, raw_p_down = raw_p_down, raw_p_up
         self._sync_calibration_config()
-        p_up, p_down = calibrate_from_logits(logit_up, logit_down, self.calib_state)
-        base_dir = decide_direction(p_up, p_down, self.decision.flat_max_delta)
+        p_up, p_down = calibrate_from_logits(
+            logit_up,
+            logit_down,
+            self.calib_state,
+            flip=self.direction_flip,
+        )
+        base_dir = decide_direction(
+            p_up,
+            p_down,
+            self.decision.flat_max_prob,
+            self.decision.flat_max_delta,
+        )
 
         if self.use_patterns:
             decision_key_used, trust_dec, prior_win_dec, anti_pattern = self._decision_stats(
@@ -263,10 +288,11 @@ class ModelRunner:
                 base_dir,
                 now_ts,
             )
-            flat_margin = self._apply_context_adjustments(
+            flat_max_prob, flat_max_delta = self._apply_context_adjustments(
                 base_dir,
                 trust_ctx,
                 prior_ctx,
+                self.decision.flat_max_prob,
                 self.decision.flat_max_delta,
             )
         else:
@@ -274,16 +300,22 @@ class ModelRunner:
             trust_dec = 0.0
             prior_win_dec = 0.5
             anti_pattern = False
-            flat_margin = self.decision.flat_max_delta
+            flat_max_prob = self.decision.flat_max_prob
+            flat_max_delta = self.decision.flat_max_delta
         notes: List[str] = []
         final_dir = base_dir
         if anti_pattern and base_dir != Direction.FLAT and self.use_patterns:
-            flat_margin = clamp(
-                flat_margin + self.decision.anti_flat_delta_boost + self.decision.anti_flat_prob_boost,
+            flat_max_prob = clamp(
+                flat_max_prob + self.decision.anti_flat_prob_boost,
                 0.0,
-                0.5,
+                1.0,
             )
-            final_dir = decide_direction(p_up, p_down, flat_margin)
+            flat_max_delta = clamp(
+                flat_max_delta + self.decision.anti_flat_delta_boost,
+                0.0,
+                1.0,
+            )
+            final_dir = decide_direction(p_up, p_down, flat_max_prob, flat_max_delta)
             if final_dir == Direction.FLAT:
                 notes.append("anti_pattern_abstain")
 
@@ -322,8 +354,10 @@ class ModelRunner:
             prior_ctx=prior_ctx,
             prior_win_dec=prior_win_dec,
             flat_thresholds={
-                "flat_margin": flat_margin,
-                "base_flat_margin": self.decision.flat_max_delta,
+                "flat_max_prob": flat_max_prob,
+                "flat_max_delta": flat_max_delta,
+                "base_flat_max_prob": self.decision.flat_max_prob,
+                "base_flat_max_delta": self.decision.flat_max_delta,
             },
             notes=",".join(notes),
             meta={
@@ -361,7 +395,8 @@ class ModelRunner:
             trust_dec=trust_dec,
             prior_ctx=prior_ctx,
             prior_win_dec=prior_win_dec,
-            flat_margin=flat_margin,
+            flat_max_prob=flat_max_prob,
+            flat_max_delta=flat_max_delta,
             lr_eff=lr_eff,
             anchor_lambda_eff=anchor_lambda_eff,
             anti_pattern=anti_pattern,
@@ -382,16 +417,16 @@ class ModelRunner:
             curr_ts=candle.start_ts,
             close_prev=pending.close_prev,
             close_curr=candle.close,
-            flat_bps=self.training.flat_bps,
+            fact_flat_bps=self.fact_config.fact_flat_bps,
         )
         reward, reward_reason, reward_base, flat_penalty = reward_from_dirs(
-            pending.pred_dir, fact.direction, self.training
+            pending.pred_dir, fact.direction, self.reward_config
         )
         class_weight = self._class_weight(fact.direction)
-        sample_weight = self.training.flat_update_weight if fact.direction == Direction.FLAT else 1.0
+        sample_weight = self.training.flat_train_weight if fact.direction == Direction.FLAT else 1.0
         sample_weight *= class_weight
         self._update_fact_ema(fact.direction)
-        target = target_vector(fact.direction)
+        target = target_vector(fact.direction, flip=self.direction_flip)
 
         anchor_lambda_eff = pending.anchor_lambda_eff
         if not self.enable_anchor or not self.enable_training:
@@ -439,7 +474,7 @@ class ModelRunner:
             y_up = 0.5
         if fact.direction == Direction.FLAT or abs(fact.ret_bps) <= self.training.calib_flat_bps:
             y_up = 0.5
-            calib_weight = self.training.calib_flat_weight
+            calib_weight = self.training.flat_train_weight
         if self.enable_calibration_update and self.enable_training:
             self.calib_state = update_affine_calib(
                 self.calib_state,
@@ -448,7 +483,9 @@ class ModelRunner:
                 y_up=y_up,
                 weight=calib_weight,
                 cfg=self.calib_config,
+                flip=self.direction_flip,
             )
+            self._log_calib_health()
         self.last_class_weight = class_weight
         self.update_count += 1
 
@@ -615,6 +652,22 @@ class ModelRunner:
             n=self.calib_state.n,
         )
 
+    def _log_calib_health(self) -> None:
+        if self.calib_state.a <= self.calib_config.a_min + 1e-6:
+            logger.warning(
+                "CALIB_A_AT_FLOOR model=%s tf=%s a=%.4f",
+                self.model_id,
+                self.tf,
+                self.calib_state.a,
+            )
+        if abs(self.calib_state.b) >= 0.5:
+            logger.warning(
+                "CALIB_B_DRIFT model=%s tf=%s b=%.4f",
+                self.model_id,
+                self.tf,
+                self.calib_state.b,
+            )
+
     def _class_weight(self, fact_dir: Direction) -> float:
         if fact_dir == Direction.FLAT:
             return 1.0
@@ -689,22 +742,26 @@ class ModelRunner:
         pred_dir: Direction,
         trust_ctx: float,
         prior_ctx: Dict[str, float],
-        flat_margin: float,
-    ) -> float:
+        flat_max_prob: float,
+        flat_max_delta: float,
+    ) -> tuple[float, float]:
         if not self.decision.use_context_priors:
-            return flat_margin
+            return flat_max_prob, flat_max_delta
         if trust_ctx < self.decision.context_trust_min:
-            return flat_margin
+            return flat_max_prob, flat_max_delta
         flat_boost = self.decision.context_flat_gain * trust_ctx * prior_ctx.get("p_flat", 0.0)
-        flat_margin = clamp(flat_margin + flat_boost, 0.0, 0.5)
+        flat_max_prob = clamp(flat_max_prob + flat_boost, 0.0, 1.0)
+        flat_max_delta = clamp(flat_max_delta + flat_boost, 0.0, 1.0)
         bias = prior_ctx.get("p_up", 0.0) - prior_ctx.get("p_down", 0.0)
         if pred_dir == Direction.UP and bias > 0:
             reduce = self.decision.context_dir_gain * trust_ctx * min(1.0, abs(bias))
-            flat_margin = clamp(flat_margin - reduce, 0.0, 0.5)
+            flat_max_prob = clamp(flat_max_prob - reduce, 0.0, 1.0)
+            flat_max_delta = clamp(flat_max_delta - reduce, 0.0, 1.0)
         if pred_dir == Direction.DOWN and bias < 0:
             reduce = self.decision.context_dir_gain * trust_ctx * min(1.0, abs(bias))
-            flat_margin = clamp(flat_margin - reduce, 0.0, 0.5)
-        return flat_margin
+            flat_max_prob = clamp(flat_max_prob - reduce, 0.0, 1.0)
+            flat_max_delta = clamp(flat_max_delta - reduce, 0.0, 1.0)
+        return flat_max_prob, flat_max_delta
 
     def _adaptation(self, trust_dec: float, prior_win: float) -> tuple[float, float]:
         lr_mult = clamp(
@@ -738,6 +795,9 @@ class MultiTimeframeEngine:
         self,
         tfs: List[str],
         feature_config: FeatureConfig,
+        fact_config: FactConfig,
+        reward_config: RewardConfig,
+        model_config: ModelConfig,
         model_init: ModelInitConfig,
         training: TrainingConfig,
         decision: DecisionConfig,
@@ -768,6 +828,9 @@ class MultiTimeframeEngine:
                     model_type=MODEL_TREND,
                     feature_builder=builders[MODEL_TREND],
                     model_init=model_init,
+                    fact_config=fact_config,
+                    reward_config=reward_config,
+                    model_config=model_config,
                     training=training,
                     decision=decision,
                     lr_base=lrs.lr_trend,
@@ -780,6 +843,9 @@ class MultiTimeframeEngine:
                     model_type=MODEL_OSC,
                     feature_builder=builders[MODEL_OSC],
                     model_init=model_init,
+                    fact_config=fact_config,
+                    reward_config=reward_config,
+                    model_config=model_config,
                     training=training,
                     decision=decision,
                     lr_base=lrs.lr_osc,
@@ -792,6 +858,9 @@ class MultiTimeframeEngine:
                     model_type=MODEL_VOL,
                     feature_builder=builders[MODEL_VOL],
                     model_init=model_init,
+                    fact_config=fact_config,
+                    reward_config=reward_config,
+                    model_config=model_config,
                     training=training,
                     decision=decision,
                     lr_base=lrs.lr_vol,
@@ -931,8 +1000,13 @@ class MultiTimeframeEngine:
                 )
 
 
-def decide_direction(p_up: float, p_down: float, flat_margin: float) -> Direction:
-    if abs(p_up - 0.5) < flat_margin:
+def decide_direction(
+    p_up: float,
+    p_down: float,
+    flat_max_prob: float,
+    flat_max_delta: float,
+) -> Direction:
+    if max(p_up, p_down) <= flat_max_prob or abs(p_up - p_down) <= flat_max_delta:
         return Direction.FLAT
     return Direction.UP if p_up > p_down else Direction.DOWN
 
@@ -952,13 +1026,13 @@ def fact_from_prices(
     curr_ts: int,
     close_prev: float,
     close_curr: float,
-    flat_bps: float,
+    fact_flat_bps: float,
 ) -> Fact:
     if close_prev <= 0:
         ret_bps = 0.0
     else:
         ret_bps = ((close_curr - close_prev) / close_prev) * 10_000.0
-    if abs(ret_bps) <= flat_bps:
+    if abs(ret_bps) <= fact_flat_bps:
         direction = Direction.FLAT
     else:
         direction = Direction.UP if close_curr > close_prev else Direction.DOWN
@@ -969,36 +1043,36 @@ def fact_from_prices(
         close_prev=close_prev,
         close_curr=close_curr,
         ret_bps=ret_bps,
+        fact_flat_bps=fact_flat_bps,
         direction=direction,
     )
 
 
 def reward_from_dirs(
-    pred_dir: Direction, fact_dir: Direction, training: TrainingConfig
+    pred_dir: Direction, fact_dir: Direction, reward_config: RewardConfig
 ) -> tuple[float, str, float, float]:
-    if pred_dir == Direction.FLAT:
-        if fact_dir == Direction.FLAT:
-            base = training.reward_flat_correct
-            reason = "flat_correct"
-        else:
-            base = training.reward_flat_wrong
-            reason = "flat_wrong"
-        reward = base + training.flat_penalty
-        return reward, reason, base, training.flat_penalty
     if pred_dir == fact_dir:
-        base = training.reward_dir_correct
-        reason = "dir_correct"
-    else:
-        base = training.reward_dir_wrong
-        reason = "dir_wrong"
-    return base, reason, base, 0.0
+        base = reward_config.reward_correct
+        return base, "correct", base, 0.0
+    if fact_dir == Direction.FLAT:
+        base = reward_config.reward_dir_in_flat
+        return base, "dir_in_flat", base, 0.0
+    if pred_dir == Direction.FLAT:
+        base = reward_config.reward_flat_miss
+        return base, "flat_miss", base, 0.0
+    base = reward_config.reward_wrong_dir
+    return base, "wrong_dir", base, 0.0
 
 
-def target_vector(direction: Direction) -> np.ndarray:
+def target_vector(direction: Direction, flip: bool = False) -> np.ndarray:
     if direction == Direction.UP:
-        return np.array([1.0, 0.0], dtype=np.float32)
+        return np.array([0.0, 1.0], dtype=np.float32) if flip else np.array(
+            [1.0, 0.0], dtype=np.float32
+        )
     if direction == Direction.DOWN:
-        return np.array([0.0, 1.0], dtype=np.float32)
+        return np.array([1.0, 0.0], dtype=np.float32) if flip else np.array(
+            [0.0, 1.0], dtype=np.float32
+        )
     return np.array([0.5, 0.5], dtype=np.float32)
 
 

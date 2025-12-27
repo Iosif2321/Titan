@@ -12,19 +12,20 @@ def _ret_bps(close_prev: float, close_curr: float) -> float:
     return ((close_curr - close_prev) / close_prev) * 10_000.0
 
 
-def fact_from_candles(prev: Candle, curr: Candle, flat_bps: float) -> Fact:
+def fact_from_candles(prev: Candle, curr: Candle, fact_flat_bps: float) -> Fact:
     ret_bps = _ret_bps(prev.close, curr.close)
-    if abs(ret_bps) <= flat_bps:
+    if abs(ret_bps) <= fact_flat_bps:
         direction = Direction.FLAT
     else:
         direction = Direction.UP if curr.close > prev.close else Direction.DOWN
     return Fact(
+        tf=curr.interval,
         prev_ts=prev.start_ts,
-        target_ts=curr.start_ts,
-        interval=curr.interval,
+        curr_ts=curr.start_ts,
         close_prev=prev.close,
         close_curr=curr.close,
         ret_bps=ret_bps,
+        fact_flat_bps=fact_flat_bps,
         direction=direction,
     )
 

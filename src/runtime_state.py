@@ -153,6 +153,7 @@ def _fact_to_dict(fact: Optional[Fact]) -> Optional[Dict[str, Any]]:
         "close_prev": fact.close_prev,
         "close_curr": fact.close_curr,
         "ret_bps": fact.ret_bps,
+        "fact_flat_bps": fact.fact_flat_bps,
         "direction": fact.direction.value,
     }
 

@@ -3,7 +3,16 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Dict
 
-from .config import DecisionConfig, FeatureConfig, ModelLRConfig, PatternConfig, TrainingConfig
+from .config import (
+    DecisionConfig,
+    FactConfig,
+    FeatureConfig,
+    ModelConfig,
+    ModelLRConfig,
+    PatternConfig,
+    RewardConfig,
+    TrainingConfig,
+)
 
 
 class ConfigManager:
@@ -11,12 +20,18 @@ class ConfigManager:
         self,
         feature_config: FeatureConfig,
         decision_config: DecisionConfig,
+        fact_config: FactConfig,
+        reward_config: RewardConfig,
+        model_config: ModelConfig,
         training_config: TrainingConfig,
         lr_config: ModelLRConfig,
         pattern_config: PatternConfig,
     ) -> None:
         self.feature_config = feature_config
         self.decision_config = decision_config
+        self.fact_config = fact_config
+        self.reward_config = reward_config
+        self.model_config = model_config
         self.training_config = training_config
         self.lr_config = lr_config
         self.pattern_config = pattern_config
@@ -31,13 +46,12 @@ class ConfigManager:
             allowed_keys = {
                 "flat_max_prob",
                 "flat_max_delta",
-                "flat_bps",
-                "flat_update_weight",
-                "reward_dir_correct",
-                "reward_dir_wrong",
-                "reward_flat_correct",
-                "reward_flat_wrong",
-                "flat_penalty",
+                "fact_flat_bps",
+                "flat_train_weight",
+                "reward_correct",
+                "reward_wrong_dir",
+                "reward_flat_miss",
+                "reward_dir_in_flat",
                 "class_balance_strength",
                 "class_balance_ema",
                 "class_balance_min",
@@ -95,61 +109,53 @@ class ConfigManager:
                 else:
                     reject("flat_max_delta", "must be in [0, 1)")
 
-            if "flat_bps" in payload:
-                value = payload["flat_bps"]
+            if "fact_flat_bps" in payload:
+                value = payload["fact_flat_bps"]
                 if isinstance(value, (int, float)) and value >= 0:
-                    self.training_config.flat_bps = float(value)
-                    applied["flat_bps"] = self.training_config.flat_bps
+                    self.fact_config.fact_flat_bps = float(value)
+                    applied["fact_flat_bps"] = self.fact_config.fact_flat_bps
                 else:
-                    reject("flat_bps", "must be >= 0")
+                    reject("fact_flat_bps", "must be >= 0")
 
-            if "flat_update_weight" in payload:
-                value = payload["flat_update_weight"]
+            if "flat_train_weight" in payload:
+                value = payload["flat_train_weight"]
                 if isinstance(value, (int, float)) and 0 <= value <= 1:
-                    self.training_config.flat_update_weight = float(value)
-                    applied["flat_update_weight"] = self.training_config.flat_update_weight
+                    self.training_config.flat_train_weight = float(value)
+                    applied["flat_train_weight"] = self.training_config.flat_train_weight
                 else:
-                    reject("flat_update_weight", "must be in [0, 1]")
+                    reject("flat_train_weight", "must be in [0, 1]")
 
-            if "reward_dir_correct" in payload:
-                value = payload["reward_dir_correct"]
+            if "reward_correct" in payload:
+                value = payload["reward_correct"]
                 if isinstance(value, (int, float)):
-                    self.training_config.reward_dir_correct = float(value)
-                    applied["reward_dir_correct"] = self.training_config.reward_dir_correct
+                    self.reward_config.reward_correct = float(value)
+                    applied["reward_correct"] = self.reward_config.reward_correct
                 else:
-                    reject("reward_dir_correct", "must be numeric")
+                    reject("reward_correct", "must be numeric")
 
-            if "reward_dir_wrong" in payload:
-                value = payload["reward_dir_wrong"]
+            if "reward_wrong_dir" in payload:
+                value = payload["reward_wrong_dir"]
                 if isinstance(value, (int, float)):
-                    self.training_config.reward_dir_wrong = float(value)
-                    applied["reward_dir_wrong"] = self.training_config.reward_dir_wrong
+                    self.reward_config.reward_wrong_dir = float(value)
+                    applied["reward_wrong_dir"] = self.reward_config.reward_wrong_dir
                 else:
-                    reject("reward_dir_wrong", "must be numeric")
+                    reject("reward_wrong_dir", "must be numeric")
 
-            if "reward_flat_correct" in payload:
-                value = payload["reward_flat_correct"]
+            if "reward_flat_miss" in payload:
+                value = payload["reward_flat_miss"]
                 if isinstance(value, (int, float)):
-                    self.training_config.reward_flat_correct = float(value)
-                    applied["reward_flat_correct"] = self.training_config.reward_flat_correct
+                    self.reward_config.reward_flat_miss = float(value)
+                    applied["reward_flat_miss"] = self.reward_config.reward_flat_miss
                 else:
-                    reject("reward_flat_correct", "must be numeric")
+                    reject("reward_flat_miss", "must be numeric")
 
-            if "reward_flat_wrong" in payload:
-                value = payload["reward_flat_wrong"]
+            if "reward_dir_in_flat" in payload:
+                value = payload["reward_dir_in_flat"]
                 if isinstance(value, (int, float)):
-                    self.training_config.reward_flat_wrong = float(value)
-                    applied["reward_flat_wrong"] = self.training_config.reward_flat_wrong
+                    self.reward_config.reward_dir_in_flat = float(value)
+                    applied["reward_dir_in_flat"] = self.reward_config.reward_dir_in_flat
                 else:
-                    reject("reward_flat_wrong", "must be numeric")
-
-            if "flat_penalty" in payload:
-                value = payload["flat_penalty"]
-                if isinstance(value, (int, float)):
-                    self.training_config.flat_penalty = float(value)
-                    applied["flat_penalty"] = self.training_config.flat_penalty
-                else:
-                    reject("flat_penalty", "must be numeric")
+                    reject("reward_dir_in_flat", "must be numeric")
 
             if "class_balance_strength" in payload:
                 value = payload["class_balance_strength"]
@@ -454,7 +460,12 @@ class ConfigManager:
         return {
             "flat_max_prob": self.decision_config.flat_max_prob,
             "flat_max_delta": self.decision_config.flat_max_delta,
-            "flat_bps": self.training_config.flat_bps,
+            "fact_flat_bps": self.fact_config.fact_flat_bps,
+            "flat_train_weight": self.training_config.flat_train_weight,
+            "reward_correct": self.reward_config.reward_correct,
+            "reward_wrong_dir": self.reward_config.reward_wrong_dir,
+            "reward_flat_miss": self.reward_config.reward_flat_miss,
+            "reward_dir_in_flat": self.reward_config.reward_dir_in_flat,
             "calib_lr": self.training_config.calib_lr,
             "calib_a_min": self.training_config.calib_a_min,
             "calib_a_max": self.training_config.calib_a_max,

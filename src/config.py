@@ -62,14 +62,27 @@ class FeatureConfig:
 
 @dataclass
 class DecisionConfig:
-    flat_max_prob: float = 0.45
-    flat_max_delta: float = 0.06
+    flat_max_prob: float = 0.55
+    flat_max_delta: float = 0.02
     use_context_priors: bool = True
     context_trust_min: float = 0.15
     context_flat_gain: float = 0.12
     context_dir_gain: float = 0.08
     anti_flat_prob_boost: float = 0.08
     anti_flat_delta_boost: float = 0.05
+
+
+@dataclass
+class FactConfig:
+    fact_flat_bps: float = 1.0
+
+
+@dataclass
+class RewardConfig:
+    reward_correct: float = 1.0
+    reward_wrong_dir: float = -1.0
+    reward_flat_miss: float = -0.5
+    reward_dir_in_flat: float = -0.5
 
 
 @dataclass
@@ -91,28 +104,19 @@ class TrainingConfig:
     lr_max_mult: float = 2.0
     anchor_min_mult: float = 0.5
     anchor_max_mult: float = 2.0
-    flat_bps: float = 0.0
-    flat_update_weight: float = 0.5
-    reward_correct: float = 1.0
-    reward_wrong: float = -1.0
-    reward_flat: float = 0.0
-    reward_dir_correct: float = 1.0
-    reward_dir_wrong: float = -1.0
-    reward_flat_correct: float = 0.0
-    reward_flat_wrong: float = -1.0
-    flat_penalty: float = -0.2
+    flat_train_weight: float = 0.25
     class_balance_strength: float = 0.5
     class_balance_ema: float = 0.98
     class_balance_min: float = 0.5
     class_balance_max: float = 2.0
     class_balance_floor: float = 0.05
-    calib_lr: float = 0.01
-    calib_a_min: float = 0.05
+    calib_lr: float = 0.005
+    calib_a_min: float = 0.30
     calib_a_max: float = 2.0
     calib_b_min: float = -1.0
     calib_b_max: float = 1.0
-    calib_l2_a: float = 1e-4
-    calib_l2_b: float = 1e-4
+    calib_l2_a: float = 0.01
+    calib_l2_b: float = 0.001
     calib_flat_bps: float = 1.0
     calib_flat_weight: float = 0.25
     calibration_bins: int = 10
@@ -172,11 +176,25 @@ class LoggingConfig:
 
 
 @dataclass
+class ModelConfig:
+    direction_flip_by_model: Dict[str, bool] = field(
+        default_factory=lambda: {
+            "TRENDVIC": False,
+            "OSCILLATOR": True,
+            "VOLUMEMETRIX": True,
+        }
+    )
+
+
+@dataclass
 class AppConfig:
     data: DataConfig
     rest: RestConfig
     features: FeatureConfig
     decision: DecisionConfig
+    facts: FactConfig
+    reward: RewardConfig
+    model: ModelConfig
     model_init: ModelInitConfig
     training: TrainingConfig
     lrs: ModelLRConfig

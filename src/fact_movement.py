@@ -9,7 +9,7 @@ from typing import Deque, Optional
 
 from .bybit_rest import fetch_klines
 from .bybit_ws import stream_candles
-from .config import DataConfig, RestConfig
+from .config import DataConfig, FactConfig, RestConfig
 from .recording import JsonlWriter
 from .types import Candle, Direction
 from .utils import ts_iso
@@ -27,20 +27,20 @@ class FactMove:
 
 
 def _direction_from_close(
-    close_prev: float, close_curr: float, flat_bps: float
+    close_prev: float, close_curr: float, fact_flat_bps: float
 ) -> Direction:
     if close_prev <= 0:
         return Direction.FLAT
     ret_bps = ((close_curr - close_prev) / close_prev) * 10_000.0
-    if abs(ret_bps) <= flat_bps:
+    if abs(ret_bps) <= fact_flat_bps:
         return Direction.FLAT
     return Direction.UP if close_curr > close_prev else Direction.DOWN
 
 
-def _make_fact(prev: Candle, curr: Candle, flat_bps: float) -> FactMove:
+def _make_fact(prev: Candle, curr: Candle, fact_flat_bps: float) -> FactMove:
     delta = curr.close - prev.close
     ret_bps = (delta / prev.close) * 10_000.0 if prev.close > 0 else 0.0
-    direction = _direction_from_close(prev.close, curr.close, flat_bps)
+    direction = _direction_from_close(prev.close, curr.close, fact_flat_bps)
     return FactMove(
         prev_start_ts=prev.start_ts,
         curr_start_ts=curr.start_ts,
@@ -99,7 +99,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--log-level", default="INFO")
 
     p.add_argument("--window", type=int, default=5)
-    p.add_argument("--flat-bps", type=float, default=0.0)
+    p.add_argument("--fact-flat-bps", type=float, default=FactConfig().fact_flat_bps)
 
     p.add_argument(
         "--history-limit",
@@ -155,7 +155,7 @@ async def run_live(args: argparse.Namespace) -> None:
                 warm = hist[-(window + 1):]
                 last_candle = warm[-1]
                 for prev, curr in zip(warm[:-1], warm[1:]):
-                    facts.append(_make_fact(prev, curr, args.flat_bps))
+                    facts.append(_make_fact(prev, curr, args.fact_flat_bps))
 
                 if len(facts) >= window:
                     _print_summary(facts, window)
@@ -178,7 +178,7 @@ async def run_live(args: argparse.Namespace) -> None:
             last_candle = candle
             continue
 
-        fact = _make_fact(last_candle, candle, args.flat_bps)
+        fact = _make_fact(last_candle, candle, args.fact_flat_bps)
         facts.append(fact)
 
         if writer is not None:

@@ -2,7 +2,16 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from src.config import DecisionConfig, FeatureConfig, ModelInitConfig, PatternConfig, TrainingConfig
+from src.config import (
+    DecisionConfig,
+    FactConfig,
+    FeatureConfig,
+    ModelConfig,
+    ModelInitConfig,
+    PatternConfig,
+    RewardConfig,
+    TrainingConfig,
+)
 from src.engine import CandleBuffer, ModelRunner
 from src.features import FeatureBuilder, MODEL_TREND
 from src.pattern_store import PatternStore
@@ -30,7 +39,10 @@ class PendingAlignmentTests(unittest.TestCase):
                 model_type=MODEL_TREND,
                 feature_builder=builder,
                 model_init=ModelInitConfig(),
-                training=TrainingConfig(flat_bps=0.0),
+                fact_config=FactConfig(fact_flat_bps=0.0),
+                reward_config=RewardConfig(),
+                model_config=ModelConfig(),
+                training=TrainingConfig(),
                 decision=DecisionConfig(),
                 lr_base=0.001,
                 pattern_store=pattern_store,

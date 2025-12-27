@@ -80,6 +80,7 @@ class Fact:
     close_prev: float
     close_curr: float
     ret_bps: float
+    fact_flat_bps: float
     direction: Direction
 
     @property

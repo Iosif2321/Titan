@@ -4,7 +4,15 @@ from pathlib import Path
 
 import numpy as np
 
-from src.config import DecisionConfig, ModelInitConfig, PatternConfig, TrainingConfig
+from src.config import (
+    DecisionConfig,
+    FactConfig,
+    ModelConfig,
+    ModelInitConfig,
+    PatternConfig,
+    RewardConfig,
+    TrainingConfig,
+)
 from src.engine import build_context_key, build_decision_key
 from src.features import FeatureBundle, FeatureSpec
 from src.pattern_store import PatternStore
@@ -60,13 +68,16 @@ class AntiPatternAbstainTests(unittest.TestCase):
                 model_type="TRENDVIC",
                 feature_builder=DummyFeatureBuilder(),
                 model_init=ModelInitConfig(),
+                fact_config=FactConfig(),
+                reward_config=RewardConfig(),
+                model_config=ModelConfig(),
                 training=TrainingConfig(),
                 decision=DecisionConfig(),
                 lr_base=0.001,
                 pattern_store=store,
                 state_store=state_store,
             )
-            runner.model.predict = lambda features, use_ema=True: (1.0, 0.0, 0.73, 0.27)
+            runner.model.predict = lambda features, use_ema=True: (0.24, 0.0, 0.56, 0.44)
 
             candle = Candle(
                 start_ts=now,

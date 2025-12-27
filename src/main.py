@@ -13,13 +13,16 @@ from .config import (
     DashboardConfig,
     DataConfig,
     DecisionConfig,
+    FactConfig,
     FeatureConfig,
     LoggingConfig,
+    ModelConfig,
     ModelInitConfig,
     ModelLRConfig,
     OutputConfig,
     PatternConfig,
     PersistenceConfig,
+    RewardConfig,
     RestConfig,
     TrainingConfig,
 )
@@ -42,6 +45,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     rest_defaults = RestConfig()
     feature_defaults = FeatureConfig()
     decision_defaults = DecisionConfig()
+    fact_defaults = FactConfig()
+    reward_defaults = RewardConfig()
     training_defaults = TrainingConfig()
     lr_defaults = ModelLRConfig()
     pattern_defaults = PatternConfig()
@@ -80,36 +85,35 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--flat-max-delta", type=float, default=decision_defaults.flat_max_delta
     )
-    parser.add_argument("--flat-bps", type=float, default=training_defaults.flat_bps)
     parser.add_argument(
-        "--flat-update-weight",
+        "--fact-flat-bps",
         type=float,
-        default=training_defaults.flat_update_weight,
+        default=fact_defaults.fact_flat_bps,
     )
     parser.add_argument(
-        "--reward-dir-correct",
+        "--flat-train-weight",
         type=float,
-        default=training_defaults.reward_dir_correct,
+        default=training_defaults.flat_train_weight,
     )
     parser.add_argument(
-        "--reward-dir-wrong",
+        "--reward-correct",
         type=float,
-        default=training_defaults.reward_dir_wrong,
+        default=reward_defaults.reward_correct,
     )
     parser.add_argument(
-        "--reward-flat-correct",
+        "--reward-wrong-dir",
         type=float,
-        default=training_defaults.reward_flat_correct,
+        default=reward_defaults.reward_wrong_dir,
     )
     parser.add_argument(
-        "--reward-flat-wrong",
+        "--reward-flat-miss",
         type=float,
-        default=training_defaults.reward_flat_wrong,
+        default=reward_defaults.reward_flat_miss,
     )
     parser.add_argument(
-        "--flat-penalty",
+        "--reward-dir-in-flat",
         type=float,
-        default=training_defaults.flat_penalty,
+        default=reward_defaults.reward_dir_in_flat,
     )
     parser.add_argument(
         "--class-balance-strength",
@@ -299,6 +303,16 @@ async def run(args: argparse.Namespace) -> None:
         flat_max_prob=args.flat_max_prob,
         flat_max_delta=args.flat_max_delta,
     )
+    fact_config = FactConfig(
+        fact_flat_bps=args.fact_flat_bps,
+    )
+    reward_config = RewardConfig(
+        reward_correct=args.reward_correct,
+        reward_wrong_dir=args.reward_wrong_dir,
+        reward_flat_miss=args.reward_flat_miss,
+        reward_dir_in_flat=args.reward_dir_in_flat,
+    )
+    model_config = ModelConfig()
     model_init = ModelInitConfig(
         init_mode=args.init_mode,
         seed=args.seed,
@@ -315,13 +329,7 @@ async def run(args: argparse.Namespace) -> None:
         lr_max_mult=args.lr_max_mult,
         anchor_min_mult=args.anchor_min_mult,
         anchor_max_mult=args.anchor_max_mult,
-        flat_bps=args.flat_bps,
-        flat_update_weight=args.flat_update_weight,
-        reward_dir_correct=args.reward_dir_correct,
-        reward_dir_wrong=args.reward_dir_wrong,
-        reward_flat_correct=args.reward_flat_correct,
-        reward_flat_wrong=args.reward_flat_wrong,
-        flat_penalty=args.flat_penalty,
+        flat_train_weight=args.flat_train_weight,
         class_balance_strength=args.class_balance_strength,
         class_balance_ema=args.class_balance_ema,
         class_balance_min=args.class_balance_min,
@@ -380,6 +388,9 @@ async def run(args: argparse.Namespace) -> None:
         rest=rest_config,
         features=feature_config,
         decision=decision_config,
+        facts=fact_config,
+        reward=reward_config,
+        model=model_config,
         model_init=model_init,
         training=training,
         lrs=lrs,
@@ -397,6 +408,9 @@ async def run(args: argparse.Namespace) -> None:
     engine = MultiTimeframeEngine(
         tfs=data_config.tfs,
         feature_config=feature_config,
+        fact_config=fact_config,
+        reward_config=reward_config,
+        model_config=model_config,
         model_init=model_init,
         training=training,
         decision=decision_config,
@@ -409,7 +423,16 @@ async def run(args: argparse.Namespace) -> None:
     recorder = JsonlRecorder(output.out_dir) if output.out_dir else None
     runtime_state = RuntimeState(history_size=dashboard.history_size)
     runtime_state.update_jax_info(backend, devices)
-    config_manager = ConfigManager(feature_config, decision_config, training, lrs, patterns)
+    config_manager = ConfigManager(
+        feature_config,
+        decision_config,
+        fact_config,
+        reward_config,
+        model_config,
+        training,
+        lrs,
+        patterns,
+    )
 
     analysis = None
     analysis_task = None

@@ -16,11 +16,14 @@ import numpy as np
 from .candle_source import BybitRestCandleSource, JsonlCandleSource
 from .config import (
     DecisionConfig,
+    FactConfig,
     FeatureConfig,
     ModelInitConfig,
+    ModelConfig,
     ModelLRConfig,
     PatternConfig,
     PersistenceConfig,
+    RewardConfig,
     RestConfig,
     TrainingConfig,
 )
@@ -105,6 +108,7 @@ class OfflineStats:
         self.correct = 0
         self.nonflat_total = 0
         self.nonflat_correct = 0
+        self.nonflat_swapped_correct = 0
         self.flat_total = 0
         self.flat_correct = 0
         self.pred_dir_counts = {d.value: 0 for d in Direction}
@@ -130,12 +134,19 @@ class OfflineStats:
         self.pred_dir_counts[pred_dir] += 1
         self.fact_dir_counts[fact_dir] += 1
         self.confusion[pred_dir][fact_dir] += 1
-        if pred_dir == Direction.FLAT.value:
+        if fact_dir == Direction.FLAT.value:
             self.flat_total += 1
-            self.flat_correct += int(correct and fact_dir == Direction.FLAT.value)
+            self.flat_correct += int(correct)
         else:
             self.nonflat_total += 1
             self.nonflat_correct += int(correct)
+            swapped = pred_dir
+            if pred_dir == Direction.UP.value:
+                swapped = Direction.DOWN.value
+            elif pred_dir == Direction.DOWN.value:
+                swapped = Direction.UP.value
+            self.nonflat_swapped_correct += int(swapped == fact_dir)
+        if pred_dir != Direction.FLAT.value:
             self.calibration.update(update.pred_conf, correct, abs(update.ret_bps))
         self.conf_sum += update.pred_conf
         if update.pred_conf >= CONFIDENT_WRONG_THRESHOLD and not correct:
@@ -171,6 +182,10 @@ class OfflineStats:
         nonflat_accuracy = (
             self.nonflat_correct / self.nonflat_total if self.nonflat_total else 0.0
         )
+        nonflat_swapped_accuracy = (
+            self.nonflat_swapped_correct / self.nonflat_total if self.nonflat_total else 0.0
+        )
+        inversion_delta = nonflat_swapped_accuracy - nonflat_accuracy
         flat_rate = self.flat_total / total if total else 0.0
         avg_conf = self.conf_sum / total if total else 0.0
         calib = self.calibration.snapshot()
@@ -178,6 +193,9 @@ class OfflineStats:
             "total": total,
             "accuracy": accuracy,
             "accuracy_nonflat": nonflat_accuracy,
+            "accuracy_nonflat_swapped": nonflat_swapped_accuracy,
+            "inversion_delta": inversion_delta,
+            "nonflat_total": self.nonflat_total,
             "flat_rate": flat_rate,
             "avg_conf": avg_conf,
             "confusion": self.confusion,
@@ -432,6 +450,8 @@ def _write_report(run_dir: Path, summary: Dict[str, object]) -> None:
     lines.append(f"- tfs: {', '.join(run.get('tfs', []))}")
     lines.append(f"- mode: {run.get('mode')}")
     lines.append(f"- range: {run.get('start')} -> {run.get('end')}")
+    if run.get("fact_flat_bps") is not None:
+        lines.append(f"- fact_flat_bps: {run.get('fact_flat_bps')}")
     lines.append(f"- candles: {run.get('candles_total')}")
     counts = summary.get("counts", {})
     lines.append(
@@ -439,18 +459,26 @@ def _write_report(run_dir: Path, summary: Dict[str, object]) -> None:
         f"updates: {counts.get('updates_total')} pending_tail: {counts.get('pending_tail')}"
     )
     errors = summary.get("checks", {}).get("errors", [])
+    warnings = summary.get("checks", {}).get("warnings", [])
     lines.append(f"- checks: {'PASS' if not errors else 'FAIL'} ({len(errors)} errors)")
     if errors:
         lines.append("")
         lines.append("## Failed Checks")
         for err in errors[:20]:
             lines.append(f"- {err}")
+    if warnings:
+        lines.append("")
+        lines.append("## Warnings")
+        for warning in warnings[:20]:
+            lines.append(f"- {warning}")
 
     lines.append("")
     lines.append("## Overall")
     overall = summary.get("overall", {})
     lines.append(
         f"- accuracy: {overall.get('accuracy'):.3f} nonflat: {overall.get('accuracy_nonflat'):.3f} "
+        f"nonflat_swapped: {overall.get('accuracy_nonflat_swapped'):.3f} "
+        f"inversion_delta: {overall.get('inversion_delta'):.3f} "
         f"flat_rate: {overall.get('flat_rate'):.3f} avg_conf: {overall.get('avg_conf'):.3f}"
     )
     calib = overall.get("calibration", {})
@@ -476,6 +504,8 @@ def _write_report(run_dir: Path, summary: Dict[str, object]) -> None:
         lines.append(f"### {key}")
         lines.append(
             f"- accuracy: {payload.get('accuracy'):.3f} nonflat: {payload.get('accuracy_nonflat'):.3f} "
+            f"nonflat_swapped: {payload.get('accuracy_nonflat_swapped'):.3f} "
+            f"inversion_delta: {payload.get('inversion_delta'):.3f} "
             f"flat_rate: {payload.get('flat_rate'):.3f} avg_conf: {payload.get('avg_conf'):.3f}"
         )
         calib = payload.get("calibration", {})
@@ -573,6 +603,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-patterns", action="store_true")
     parser.add_argument("--no-anchor", action="store_true")
     parser.add_argument("--no-ema", action="store_true")
+    parser.add_argument("--fact-flat-bps", type=float, default=FactConfig().fact_flat_bps)
     parser.add_argument("--candles-jsonl", default=None)
     parser.add_argument("--log-level", default="INFO")
     return parser
@@ -610,6 +641,9 @@ def main() -> None:
 
     feature_config = FeatureConfig()
     decision_config = DecisionConfig()
+    fact_config = FactConfig(fact_flat_bps=args.fact_flat_bps)
+    reward_config = RewardConfig()
+    model_config = ModelConfig()
     training = TrainingConfig()
     model_init = ModelInitConfig()
     lrs = ModelLRConfig()
@@ -644,6 +678,9 @@ def main() -> None:
     engine = MultiTimeframeEngine(
         tfs=tfs,
         feature_config=feature_config,
+        fact_config=fact_config,
+        reward_config=reward_config,
+        model_config=model_config,
         model_init=model_init,
         training=training,
         decision=decision_config,
@@ -767,6 +804,19 @@ def main() -> None:
                     "top": pattern_store.top_patterns(tf, runner.model_id, limit=5),
                 }
 
+    warnings: List[str] = []
+    for key, stats in collector.by_model.items():
+        summary_stats = stats.summary()
+        nonflat_total = int(summary_stats.get("nonflat_total", 0))
+        inversion_delta = float(summary_stats.get("inversion_delta", 0.0))
+        if nonflat_total >= 50 and inversion_delta >= 0.10:
+            warning_msg = (
+                f"inversion_warning {key} delta={inversion_delta:.3f} "
+                f"nonflat_total={nonflat_total}"
+            )
+            warnings.append(warning_msg)
+            logging.warning("Inversion detected: %s", warning_msg)
+
     summary = {
         "run": {
             "symbol": args.symbol,
@@ -776,6 +826,7 @@ def main() -> None:
             "end": _iso_local(end_ms),
             "candles_total": len(merged),
             "run_dir": str(run_dir),
+            "fact_flat_bps": fact_config.fact_flat_bps,
         },
         "counts": {
             **counts,
@@ -784,7 +835,7 @@ def main() -> None:
         "overall": collector.overall.summary(),
         "models": {k: v.summary() for k, v in collector.by_model.items()},
         "patterns": patterns_report,
-        "checks": {"errors": collector_errors},
+        "checks": {"errors": collector_errors, "warnings": warnings},
         "guards": {
             "min_dir_share": MIN_DIR_SHARE,
             "max_dir_share": MAX_DIR_SHARE,
