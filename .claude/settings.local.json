@@ -1,0 +1,6 @@
+{
+  "enabledMcpjsonServers": [
+    "memory-keeper"
+  ],
+  "enableAllProjectMcpServers": true
+}

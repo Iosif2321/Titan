@@ -20,6 +20,14 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "pattern.volume_z_low": -1.0,
     "ensemble.flat_threshold": 0.55,
     "ensemble.min_margin": 0.05,
+    "ensemble.vol_z_high": 1.0,
+    "ensemble.trendvic_high_scale": 0.6,
+    "ensemble.high_vol_flat_add": 0.05,
+    "ensemble.high_vol_margin_add": 0.02,
+    "calibration.enabled": True,
+    "calibration.min_samples": 30,
+    "calibration.blend": 0.7,
+    "calibration.decay": 1.0,
     "weights.min_weight": 0.1,
 }
 

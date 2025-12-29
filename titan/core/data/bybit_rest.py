@@ -2,9 +2,55 @@ import json
 import time
 import urllib.parse
 import urllib.request
-from typing import Dict, List, Optional
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple
 
 from titan.core.data.schema import Candle
+
+
+@dataclass
+class CandleGap:
+    """Represents a gap in candle data."""
+    expected_ts: int
+    actual_ts: int
+    missing_count: int
+
+
+def validate_candle_continuity(
+    candles: List[Candle],
+    interval_sec: int,
+) -> Tuple[List[CandleGap], int]:
+    """Check for gaps in candle sequence.
+
+    Args:
+        candles: Sorted list of candles
+        interval_sec: Expected interval between candles in seconds
+
+    Returns:
+        Tuple of (list of gaps, total missing candles count)
+    """
+    if len(candles) < 2:
+        return [], 0
+
+    gaps: List[CandleGap] = []
+    total_missing = 0
+
+    for i in range(1, len(candles)):
+        expected_ts = candles[i - 1].ts + interval_sec
+        actual_ts = candles[i].ts
+        delta = actual_ts - expected_ts
+
+        if delta > 0:
+            # There's a gap
+            missing_count = delta // interval_sec
+            total_missing += missing_count
+            gaps.append(CandleGap(
+                expected_ts=expected_ts,
+                actual_ts=actual_ts,
+                missing_count=missing_count,
+            ))
+
+    return gaps, total_missing
 
 
 _INTERVAL_SECONDS: Dict[str, int] = {

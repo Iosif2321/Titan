@@ -6,15 +6,19 @@ import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
+from titan.core.analysis import PredictionAnalyzer, PredictionDetail, StatisticalValidator
+from titan.core.calibration import OnlineCalibrator
 from titan.core.config import ConfigStore
 from titan.core.data.loader import CsvCandleReader
 from titan.core.features.stream import FeatureStream, build_conditions
 from titan.core.models.heuristic import Oscillator, TrendVIC, VolumeMetrix
 from titan.core.ensemble import Ensemble
+from titan.core.monitor import PerformanceMonitor
 from titan.core.patterns import PatternStore
+from titan.core.regime import RegimeDetector
 from titan.core.state_store import StateStore
-from titan.core.types import ModelOutput, Outcome, PredictionRecord
-from titan.core.weights import WeightManager
+from titan.core.types import Decision, ModelOutput, Outcome, PredictionRecord
+from titan.core.weights import AdaptiveWeightManager, WeightManager
 
 
 @dataclass
@@ -57,13 +61,14 @@ class ModelStats:
 
 
 class BacktestStats:
-    def __init__(self, model_names: List[str]) -> None:
+    def __init__(self, model_names: List[str], interval_minutes: int = 1) -> None:
         self.total = 0
         self.correct = 0
         self.confidence_sum = 0.0
         self.decision_counts = {"UP": 0, "DOWN": 0, "FLAT": 0}
         self.actual_counts = {"UP": 0, "DOWN": 0, "FLAT": 0}
         self.models = {name: ModelStats() for name in model_names}
+        self.interval_minutes = interval_minutes
 
         # Extended metrics
         self.confusion: Dict[str, Dict[str, int]] = {
@@ -114,6 +119,20 @@ class BacktestStats:
         }
         self.last_prices: List[float] = []
 
+        # Regime-based tracking
+        self.regime_counts: Dict[str, int] = {
+            "trending_up": 0,
+            "trending_down": 0,
+            "ranging": 0,
+            "volatile": 0,
+        }
+        self.regime_correct: Dict[str, int] = {
+            "trending_up": 0,
+            "trending_down": 0,
+            "ranging": 0,
+            "volatile": 0,
+        }
+
     def _get_confidence_bucket(self, confidence: float) -> str:
         if confidence < 0.55:
             return "0.50-0.55"
@@ -133,6 +152,7 @@ class BacktestStats:
         prediction: PredictionRecord,
         outcome: Outcome,
         model_decisions: Dict[str, str],
+        regime: Optional[str] = None,
     ) -> None:
         self.total += 1
         self.confidence_sum += prediction.decision.confidence
@@ -146,6 +166,12 @@ class BacktestStats:
         is_correct = pred_dir == actual_dir
         if is_correct:
             self.correct += 1
+
+        # Track regime statistics
+        if regime and regime in self.regime_counts:
+            self.regime_counts[regime] += 1
+            if is_correct:
+                self.regime_correct[regime] += 1
 
         # Confidence calibration
         bucket = self._get_confidence_bucket(prediction.decision.confidence)
@@ -311,14 +337,16 @@ class BacktestStats:
         return self.confident_wrong_count / self.confident_total
 
     def sharpe_ratio(self) -> float:
-        """Annualized Sharpe ratio (assuming 1-minute candles, 525600 per year)."""
+        """Annualized Sharpe ratio based on interval_minutes."""
         if len(self.returns) < 2:
             return 0.0
         mean_ret = sum(self.returns) / len(self.returns)
         var = sum((r - mean_ret) ** 2 for r in self.returns) / len(self.returns)
         std = math.sqrt(var) if var > 0 else 1e-10
-        # Annualize: sqrt(525600) ≈ 725
-        return (mean_ret / std) * 725
+        # Annualize: sqrt(periods_per_year), where periods_per_year = 525600 / interval_minutes
+        periods_per_year = 525600 / self.interval_minutes
+        annualization_factor = math.sqrt(periods_per_year)
+        return (mean_ret / std) * annualization_factor
 
     def sortino_ratio(self) -> float:
         """Sortino ratio - Sharpe but only penalizes downside volatility."""
@@ -330,7 +358,10 @@ class BacktestStats:
             return float('inf') if mean_ret > 0 else 0.0
         downside_var = sum(r ** 2 for r in downside) / len(downside)
         downside_std = math.sqrt(downside_var) if downside_var > 0 else 1e-10
-        return (mean_ret / downside_std) * 725
+        # Annualize: sqrt(periods_per_year), where periods_per_year = 525600 / interval_minutes
+        periods_per_year = 525600 / self.interval_minutes
+        annualization_factor = math.sqrt(periods_per_year)
+        return (mean_ret / downside_std) * annualization_factor
 
     def direction_balance(self) -> Dict[str, float]:
         """Check for direction collapse (one direction dominating)."""
@@ -342,6 +373,15 @@ class BacktestStats:
         # Balance score: 1.0 = perfect balance, 0.0 = complete collapse
         balance_score = 1.0 - abs(up_ratio - 0.5) * 2
         return {"up_ratio": up_ratio, "down_ratio": down_ratio, "balance_score": balance_score}
+
+    def regime_accuracy(self) -> Dict[str, float]:
+        """Accuracy broken down by market regime."""
+        result = {}
+        for regime in self.regime_counts:
+            total = self.regime_counts[regime]
+            correct = self.regime_correct[regime]
+            result[regime] = correct / total if total > 0 else 0.0
+        return result
 
     def rolling_accuracy_stats(self) -> Dict[str, float]:
         """Statistics on rolling accuracy over time."""
@@ -428,6 +468,11 @@ class BacktestStats:
             },
             # NEW: Rolling accuracy over time
             "rolling_accuracy": self.rolling_accuracy_stats(),
+            # NEW: Regime-based accuracy
+            "regime_analysis": {
+                "counts": dict(self.regime_counts),
+                "accuracy": self.regime_accuracy(),
+            },
             "trading_metrics": {
                 "total_trades": self.profitable_trades + self.losing_trades,
                 "profitable_trades": self.profitable_trades,
@@ -768,10 +813,10 @@ def print_summary(stats: BacktestStats, run_meta: Optional[Dict[str, object]] = 
     brier_val = stats.brier_score()
     cwr = stats.confident_wrong_rate()
 
-    ece_status = "✓ GOOD" if ece_val < 0.10 else ("⚠ WARN" if ece_val < 0.20 else "✗ POOR")
-    mce_status = "✓ GOOD" if mce_val < 0.15 else ("⚠ WARN" if mce_val < 0.30 else "✗ POOR")
-    brier_status = "✓ GOOD" if brier_val < 0.20 else ("⚠ WARN" if brier_val < 0.30 else "✗ POOR")
-    cwr_status = "✓ GOOD" if cwr < 0.10 else ("⚠ WARN" if cwr < 0.30 else "✗ POOR")
+    ece_status = "[OK]" if ece_val < 0.10 else ("[WARN]" if ece_val < 0.20 else "[POOR]")
+    mce_status = "[OK]" if mce_val < 0.15 else ("[WARN]" if mce_val < 0.30 else "[POOR]")
+    brier_status = "[OK]" if brier_val < 0.20 else ("[WARN]" if brier_val < 0.30 else "[POOR]")
+    cwr_status = "[OK]" if cwr < 0.10 else ("[WARN]" if cwr < 0.30 else "[POOR]")
 
     print(f"  ECE (Expected Calibration Error):   {pct(ece_val):>8s}  {ece_status}")
     print(f"  MCE (Maximum Calibration Error):    {pct(mce_val):>8s}  {mce_status}")
@@ -783,15 +828,15 @@ def print_summary(stats: BacktestStats, run_meta: Optional[Dict[str, object]] = 
     print("  DIRECTION BALANCE")
     print("-" * 70)
     dir_balance = stats.direction_balance()
-    balance_status = "✓ BALANCED" if dir_balance["balance_score"] >= 0.8 else (
-        "⚠ IMBALANCED" if dir_balance["balance_score"] >= 0.6 else "✗ COLLAPSED"
+    balance_status = "[BALANCED]" if dir_balance["balance_score"] >= 0.8 else (
+        "[IMBALANCED]" if dir_balance["balance_score"] >= 0.6 else "[COLLAPSED]"
     )
     print(f"  UP Ratio:       {pct(dir_balance['up_ratio']):>8s}")
     print(f"  DOWN Ratio:     {pct(dir_balance['down_ratio']):>8s}")
     print(f"  Balance Score:  {dir_balance['balance_score']:.3f}   {balance_status}")
     if dir_balance["balance_score"] < 0.6:
         dominant = "UP" if dir_balance["up_ratio"] > 0.5 else "DOWN"
-        print(f"  ⚠ WARNING: Model is collapsing toward {dominant} predictions!")
+        print(f"  WARNING: Model is collapsing toward {dominant} predictions!")
 
     # NEW: Model Agreement Analysis
     print("\n" + "-" * 70)
@@ -808,8 +853,8 @@ def print_summary(stats: BacktestStats, run_meta: Optional[Dict[str, object]] = 
         print("\n" + "-" * 70)
         print("  ACCURACY STABILITY (rolling window=50)")
         print("-" * 70)
-        trend_indicator = "↑ IMPROVING" if rolling_stats["trend"] > 0.02 else (
-            "↓ DEGRADING" if rolling_stats["trend"] < -0.02 else "→ STABLE"
+        trend_indicator = "[IMPROVING]" if rolling_stats["trend"] > 0.02 else (
+            "[DEGRADING]" if rolling_stats["trend"] < -0.02 else "[STABLE]"
         )
         print(f"  Min:   {pct(rolling_stats['min']):>8s}")
         print(f"  Max:   {pct(rolling_stats['max']):>8s}")
@@ -840,8 +885,8 @@ def print_summary(stats: BacktestStats, run_meta: Optional[Dict[str, object]] = 
     sortino = stats.sortino_ratio()
     sharpe_str = f"{sharpe:.2f}" if sharpe != float('inf') else "inf"
     sortino_str = f"{sortino:.2f}" if sortino != float('inf') else "inf"
-    sharpe_status = "✓ GOOD" if sharpe > 1.5 else ("⚠ OK" if sharpe > 0.5 else "✗ POOR")
-    sortino_status = "✓ GOOD" if sortino > 2.0 else ("⚠ OK" if sortino > 1.0 else "✗ POOR")
+    sharpe_status = "[GOOD]" if sharpe > 1.5 else ("[OK]" if sharpe > 0.5 else "[POOR]")
+    sortino_status = "[GOOD]" if sortino > 2.0 else ("[OK]" if sortino > 1.0 else "[POOR]")
     print(f"\n  Risk-Adjusted Metrics:")
     print(f"    Sharpe Ratio (annualized):  {sharpe_str:>8s}  {sharpe_status}")
     print(f"    Sortino Ratio (annualized): {sortino_str:>8s}  {sortino_status}")
@@ -858,7 +903,7 @@ def print_summary(stats: BacktestStats, run_meta: Optional[Dict[str, object]] = 
             model_balance = 1.0 - abs(model_up_ratio - 0.5) * 2
         else:
             model_balance = 1.0
-        balance_indicator = "✓" if model_balance >= 0.8 else ("⚠" if model_balance >= 0.6 else "✗")
+        balance_indicator = "+" if model_balance >= 0.8 else ("~" if model_balance >= 0.6 else "-")
 
         print(f"\n  [{name}]")
         print(f"    Accuracy: {pct(model_stats.accuracy()):>8s}  ({model_stats.correct}/{model_stats.total})")
@@ -872,22 +917,37 @@ def print_summary(stats: BacktestStats, run_meta: Optional[Dict[str, object]] = 
             row = model_stats.confusion[pred_dir]
             print(f"                 {pred_dir:5s}       {row['UP']:4d}   {row['DOWN']:4d}   {row['FLAT']:4d}")
 
+    # Statistical significance
+    stat_result = StatisticalValidator.summary(stats.correct, stats.total)
+    print("\n" + "-" * 70)
+    print("  STATISTICAL SIGNIFICANCE")
+    print("-" * 70)
+    print(f"  Accuracy:       {pct(stat_result['accuracy'])} ({stat_result['correct']}/{stat_result['total']})")
+    print(f"  95% CI:         {stat_result['ci_95_str']}")
+    print(f"  p-value:        {stat_result['p_value']}")
+    sig_status = "[SIGNIFICANT]" if stat_result['significant'] else "[NOT SIGNIFICANT]"
+    print(f"  vs Random:      {sig_status}")
+    print(f"  Interpretation: {stat_result['interpretation']}")
+
     # Final summary line
     print("\n" + "=" * 70)
     print("  OVERALL ASSESSMENT")
     print("=" * 70)
     overall_acc = stats.correct / stats.total if stats.total else 0
-    acc_status = "✓ GOOD" if overall_acc >= 0.55 else ("⚠ MEDIOCRE" if overall_acc >= 0.45 else "✗ POOR")
+    acc_status = "[GOOD]" if overall_acc >= 0.55 else ("[MEDIOCRE]" if overall_acc >= 0.45 else "[POOR]")
     print(f"  Accuracy:    {pct(overall_acc):>8s}  {acc_status}")
     print(f"  Calibration: ECE={pct(ece_val):>7s}  {ece_status}")
     print(f"  Balance:     {dir_balance['balance_score']:.3f}     {balance_status}")
+    if not stat_result['significant']:
+        print("\n  WARNING: Results not statistically significant vs random!")
+        print("    - Need more data or better model")
     if overall_acc < 0.45:
-        print("\n  ⚠ RECOMMENDATION: Model accuracy is below 45%. Consider:")
+        print("\n  RECOMMENDATION: Model accuracy is below 45%. Consider:")
         print("    - Reviewing feature engineering")
         print("    - Checking for direction collapse")
         print("    - Increasing training data")
     elif ece_val > 0.20:
-        print("\n  ⚠ RECOMMENDATION: Model is poorly calibrated (ECE > 20%). Consider:")
+        print("\n  RECOMMENDATION: Model is poorly calibrated (ECE > 20%). Consider:")
         print("    - Adding calibration layer")
         print("    - Reducing overconfidence")
     print("\n" + "=" * 70)
@@ -902,17 +962,32 @@ def _model_decision(output: ModelOutput, config: ConfigStore) -> str:
 
 
 def _evaluate(prediction: PredictionRecord, next_close: float) -> Outcome:
+    """Evaluate prediction outcome.
+
+    Args:
+        prediction: The prediction record
+        next_close: The closing price of the next candle
+
+    Returns:
+        Outcome with actual direction, price delta, and return percentage.
+
+    Note:
+        Actual direction is ALWAYS UP or DOWN - the market always moves.
+        FLAT is only valid for MODEL predictions (uncertainty), not for actual.
+    """
     delta = next_close - prediction.price
-    if delta > 0:
+    return_pct = (delta / prediction.price) if prediction.price else 0.0
+
+    # Actual direction is always UP or DOWN (market always moves)
+    if delta >= 0:
         direction = "UP"
-    elif delta < 0:
-        direction = "DOWN"
     else:
-        direction = "FLAT"
+        direction = "DOWN"
+
     return Outcome(
         actual_direction=direction,
         price_delta=delta,
-        return_pct=(delta / prediction.price) if prediction.price else 0.0,
+        return_pct=return_pct,
     )
 
 
@@ -920,6 +995,7 @@ def generate_report_md(
     stats: BacktestStats,
     run_meta: Optional[Dict[str, object]] = None,
     feature_summary: Optional[Dict[str, object]] = None,
+    advanced_analysis: Optional[Dict[str, object]] = None,
 ) -> str:
     """Generate a concise Markdown report for quick analysis."""
 
@@ -928,8 +1004,8 @@ def generate_report_md(
 
     def status(val: float, good: float, warn: float, reverse: bool = False) -> str:
         if reverse:
-            return "✓" if val < good else ("⚠" if val < warn else "✗")
-        return "✓" if val >= good else ("⚠" if val >= warn else "✗")
+            return "+" if val < good else ("~" if val < warn else "-")
+        return "+" if val >= good else ("~" if val >= warn else "-")
 
     lines = ["# Backtest Report\n"]
 
@@ -941,7 +1017,7 @@ def generate_report_md(
         end_iso = run_meta.get("end_iso", "N/A")
         duration = run_meta.get("duration_hours", 0)
         lines.append(f"**Symbol:** {symbol} | **Interval:** {interval}m | **Duration:** {duration:.1f}h\n")
-        lines.append(f"**Period:** {start_iso} → {end_iso}\n")
+        lines.append(f"**Period:** {start_iso} -> {end_iso}\n")
 
     # Quick metrics
     acc = stats.correct / stats.total if stats.total else 0
@@ -958,23 +1034,23 @@ def generate_report_md(
     lines.append(f"| **Confident Wrong** | {pct(cwr)} | {status(cwr, 0.10, 0.30, reverse=True)} |")
     lines.append(f"| **Direction Balance** | {dir_balance['balance_score']:.2f} | {status(dir_balance['balance_score'], 0.8, 0.6)} |")
     lines.append(f"| **Win Rate** | {pct(stats.win_rate())} | {status(stats.win_rate(), 0.55, 0.45)} |")
-    sharpe_str = f"{sharpe:.1f}" if sharpe != float('inf') else "∞"
+    sharpe_str = f"{sharpe:.1f}" if sharpe != float('inf') else "inf"
     lines.append(f"| **Sharpe Ratio** | {sharpe_str} | {status(sharpe, 1.5, 0.5)} |")
 
     # Warnings
     warnings = []
     if acc < 0.45:
-        warnings.append("⚠ **Low accuracy** - below 45%")
+        warnings.append("**Low accuracy** - below 45%")
     if ece > 0.20:
-        warnings.append("⚠ **Poor calibration** - ECE > 20%")
+        warnings.append("**Poor calibration** - ECE > 20%")
     if cwr > 0.30:
-        warnings.append("⚠ **Overconfident** - too many confident wrong predictions")
+        warnings.append("**Overconfident** - too many confident wrong predictions")
     if dir_balance["balance_score"] < 0.6:
         dominant = "UP" if dir_balance["up_ratio"] > 0.5 else "DOWN"
-        warnings.append(f"⚠ **Direction collapse** - model biased toward {dominant}")
+        warnings.append(f"**Direction collapse** - model biased toward {dominant}")
 
     if warnings:
-        lines.append("\n## ⚠ Warnings\n")
+        lines.append("\n## Warnings\n")
         for w in warnings:
             lines.append(f"- {w}")
 
@@ -1018,9 +1094,9 @@ def generate_report_md(
     # Trading metrics
     lines.append("\n## Trading Simulation\n")
     pf = stats.profit_factor()
-    pf_str = f"{pf:.2f}" if pf != float('inf') else "∞"
+    pf_str = f"{pf:.2f}" if pf != float('inf') else "inf"
     sortino = stats.sortino_ratio()
-    sortino_str = f"{sortino:.1f}" if sortino != float('inf') else "∞"
+    sortino_str = f"{sortino:.1f}" if sortino != float('inf') else "inf"
 
     lines.append(f"- **Trades:** {stats.profitable_trades + stats.losing_trades} (Win: {stats.profitable_trades}, Loss: {stats.losing_trades})")
     lines.append(f"- **Cumulative Return:** {stats.cumulative_return * 100:+.4f}%")
@@ -1031,7 +1107,7 @@ def generate_report_md(
     # Rolling accuracy
     rolling = stats.rolling_accuracy_stats()
     if rolling["mean"] > 0:
-        trend_icon = "↑" if rolling["trend"] > 0.02 else ("↓" if rolling["trend"] < -0.02 else "→")
+        trend_icon = "^" if rolling["trend"] > 0.02 else ("v" if rolling["trend"] < -0.02 else "-")
         lines.append(f"\n## Accuracy Stability\n")
         lines.append(f"- **Range:** {pct(rolling['min'])} - {pct(rolling['max'])}")
         lines.append(f"- **Mean:** {pct(rolling['mean'])} ± {pct(rolling['std'])}")
@@ -1057,6 +1133,83 @@ def generate_report_md(
                     f"| {model_name} | {item['feature']} | {item['correlation']:.4f} | "
                     f"{item['effect_size']:.4f} | {item['count']} |"
                 )
+
+    # Advanced Analysis (NEW)
+    if advanced_analysis:
+        # Statistical significance
+        stat = advanced_analysis.get("statistical", {})
+        if stat:
+            lines.append("\n## Statistical Significance\n")
+            lines.append(f"- **Accuracy:** {pct(stat.get('accuracy', 0))} ({stat.get('correct', 0)}/{stat.get('total', 0)})")
+            lines.append(f"- **95% CI:** {stat.get('ci_95_str', 'N/A')}")
+            lines.append(f"- **p-value:** {stat.get('p_value', 1.0)}")
+            sig_icon = "+" if stat.get("significant") else "-"
+            lines.append(f"- **vs Random:** {sig_icon} {stat.get('interpretation', '')}")
+
+        # Temporal analysis
+        temporal = advanced_analysis.get("temporal", {})
+        if temporal:
+            by_session = temporal.get("by_session", {})
+            if by_session:
+                lines.append("\n## Accuracy by Session\n")
+                lines.append("| Session | Accuracy | Count |")
+                lines.append("|---------|----------|------:|")
+                for session in ["asia", "europe", "us"]:
+                    data = by_session.get(session, {})
+                    if data.get("total", 0) > 0:
+                        lines.append(f"| {session.upper()} | {pct(data['accuracy'])} | {data['total']} |")
+
+            best = temporal.get("best_hour", {})
+            worst = temporal.get("worst_hour", {})
+            if best.get("total", 0) > 0:
+                lines.append(f"\n- **Best hour:** {best['hour']}:00 UTC ({pct(best['accuracy'])})")
+            if worst.get("total", 0) > 0:
+                lines.append(f"- **Worst hour:** {worst['hour']}:00 UTC ({pct(worst['accuracy'])})")
+
+        # Magnitude analysis
+        magnitude = advanced_analysis.get("magnitude", {})
+        if magnitude:
+            by_mag = magnitude.get("by_magnitude", {})
+            if by_mag:
+                lines.append("\n## Accuracy by Movement Size\n")
+                lines.append("| Size | Accuracy | Count | % of Total |")
+                lines.append("|------|----------|------:|------------|")
+                for bucket in ["tiny", "small", "medium", "large"]:
+                    data = by_mag.get(bucket, {})
+                    if data.get("total", 0) > 0:
+                        lines.append(f"| {bucket} | {pct(data['accuracy'])} | {data['total']} | {pct(data['pct_of_total'])} |")
+
+        # Error streaks
+        streaks = advanced_analysis.get("streaks", {})
+        if streaks:
+            error_info = streaks.get("error_streaks", {})
+            if error_info.get("count", 0) > 0:
+                lines.append("\n## Error Streaks (3+)\n")
+                lines.append(f"- **Count:** {error_info['count']}")
+                lines.append(f"- **Max length:** {error_info['max_length']}")
+                lines.append(f"- **Avg length:** {error_info['avg_length']:.1f}")
+                regimes = error_info.get("common_regimes", {})
+                if regimes:
+                    top_regime = max(regimes.items(), key=lambda x: x[1])
+                    lines.append(f"- **Common regime:** {top_regime[0]} ({top_regime[1]} streaks)")
+
+        # Errors analysis
+        errors = advanced_analysis.get("errors", {})
+        if errors:
+            conf_wrong = errors.get("confident_wrong", {})
+            if conf_wrong.get("count", 0) > 0:
+                lines.append("\n## Confident Wrong Predictions (conf >= 65%)\n")
+                lines.append(f"- **Count:** {conf_wrong['count']}")
+                lines.append(f"- **Avg confidence:** {pct(conf_wrong['avg_confidence'])}")
+
+            by_regime = errors.get("by_regime", {})
+            if by_regime:
+                lines.append("\n## Error Rate by Regime\n")
+                lines.append("| Regime | Errors | Total | Error Rate |")
+                lines.append("|--------|-------:|------:|------------|")
+                for regime, data in sorted(by_regime.items(), key=lambda x: -x[1].get("error_rate", 0)):
+                    if data.get("total", 0) > 0:
+                        lines.append(f"| {regime} | {data['errors']} | {data['total']} | {pct(data['error_rate'])} |")
 
     return "\n".join(lines)
 
@@ -1108,8 +1261,19 @@ def run_backtest(
     state_store = StateStore(db_path)
     config_store = ConfigStore(state_store)
     config_store.ensure_defaults()
-    weight_manager = WeightManager(state_store)
     pattern_store = PatternStore(db_path)
+
+    # Create regime detector and performance monitor
+    regime_detector = RegimeDetector(config_store)
+    performance_monitor = PerformanceMonitor(window=100)
+
+    # Use adaptive weight manager with regime support
+    weight_manager = AdaptiveWeightManager(
+        state_store,
+        regime_detector=regime_detector,
+        monitor=performance_monitor,
+        performance_blend=0.3,  # 30% performance, 70% base regime weights
+    )
 
     models = [
         TrendVIC(config_store),
@@ -1118,10 +1282,19 @@ def run_backtest(
     ]
 
     feature_stream = FeatureStream(config_store)
-    ensemble = Ensemble(config_store, weight_manager)
+    ensemble = Ensemble(config_store, weight_manager, regime_detector=regime_detector)
+    calibrator = OnlineCalibrator(config_store)
 
-    stats = BacktestStats([model.name for model in models])
+    # Extract interval from run_meta for proper Sharpe/Sortino annualization
+    interval_minutes = 1  # default
+    if run_meta and "interval" in run_meta:
+        try:
+            interval_minutes = int(run_meta["interval"])
+        except (ValueError, TypeError):
+            interval_minutes = 1
+    stats = BacktestStats([model.name for model in models], interval_minutes=interval_minutes)
     feature_analyzer = FeatureAnalyzer([model.name for model in models])
+    prediction_analyzer = PredictionAnalyzer()  # NEW: Advanced analysis
     details_path = os.path.join(out_dir, "predictions.jsonl")
     detail_writer = DetailWriter(details_path)
 
@@ -1163,12 +1336,30 @@ def run_backtest(
 
         if pending is not None:
             outcome = _evaluate(pending, candle.close)
+            raw_confidence = max(pending.decision.prob_up, pending.decision.prob_down)
+            calibrator.update(
+                raw_confidence,
+                pending.decision.direction == outcome.actual_direction,
+            )
             if _in_target(pending.ts):
+                # Detect regime from pending prediction's features
+                pending_regime = regime_detector.detect(pending.features)
+
                 model_decisions: Dict[str, str] = {}
 
                 for output in pending.outputs:
                     model_direction = _model_decision(output, config_store)
                     model_decisions[output.model_name] = model_direction
+
+                    # Update performance monitor for adaptive weighting
+                    performance_monitor.update(
+                        model_name=output.model_name,
+                        predicted=model_direction,
+                        actual=outcome.actual_direction,
+                        regime=pending_regime,
+                        confidence=max(output.prob_up, output.prob_down),
+                    )
+
                     event = {
                         "model_state": output.state,
                         "forecast": {
@@ -1183,6 +1374,7 @@ def run_backtest(
                             "return_pct": outcome.return_pct,
                             "hit": model_direction == outcome.actual_direction,
                         },
+                        "regime": pending_regime,
                     }
                     pattern_store.record_usage(
                         pending.pattern_id,
@@ -1191,14 +1383,36 @@ def run_backtest(
                         event_ts=pending.ts,
                     )
 
-                stats.update(pending, outcome, model_decisions)
+                stats.update(pending, outcome, model_decisions, regime=pending_regime)
                 feature_analyzer.update(pending.features, outcome.actual_direction, model_decisions)
                 detail_writer.write(pending, outcome, model_decisions)
+
+                # NEW: Add to prediction analyzer for advanced analysis
+                pred_detail = PredictionDetail(
+                    ts=pending.ts,
+                    predicted=pending.decision.direction,
+                    actual=outcome.actual_direction,
+                    confidence=pending.decision.confidence,
+                    return_pct=outcome.return_pct,
+                    regime=pending_regime,
+                    features=pending.features,
+                    model_outputs={
+                        o.model_name: {"prob_up": o.prob_up, "prob_down": o.prob_down}
+                        for o in pending.outputs
+                    },
+                )
+                prediction_analyzer.add(pred_detail)
             else:
                 skipped_predictions += 1
 
         outputs = [model.predict(features) for model in models]
-        decision = ensemble.decide(outputs)
+        decision = ensemble.decide(outputs, features)
+        decision = Decision(
+            direction=decision.direction,
+            confidence=calibrator.calibrate(decision.confidence),
+            prob_up=decision.prob_up,
+            prob_down=decision.prob_down,
+        )
         pattern_id = -1
         if _in_target(candle.ts):
             conditions = build_conditions(features, config_store)
@@ -1221,6 +1435,7 @@ def run_backtest(
 
     summary = stats.summary()
     summary["feature_analysis"] = feature_analyzer.summary()
+    summary["online_calibration"] = calibrator.summary()
     summary["run_meta"] = {
         "input_csv": csv_path,
         "db_path": db_path,
@@ -1232,6 +1447,10 @@ def run_backtest(
     if run_meta:
         summary["run_meta"].update(run_meta)
     summary["weights"] = weight_manager.get_model_weights()
+    summary["performance_monitor"] = performance_monitor.get_statistics()
+
+    # NEW: Add advanced analysis
+    summary["advanced_analysis"] = prediction_analyzer.full_summary()
 
     if tune_weights:
         tuned = _tune_weights(stats, config_store)
@@ -1243,7 +1462,12 @@ def run_backtest(
         handle.write(json.dumps(summary, ensure_ascii=True, indent=2))
 
     # Generate and save Markdown report
-    report_md = generate_report_md(stats, run_meta, feature_summary=summary["feature_analysis"])
+    report_md = generate_report_md(
+        stats,
+        run_meta,
+        feature_summary=summary["feature_analysis"],
+        advanced_analysis=summary["advanced_analysis"],
+    )
     report_path = os.path.join(out_dir, "report.md")
     with open(report_path, "w", encoding="utf-8") as handle:
         handle.write(report_md)

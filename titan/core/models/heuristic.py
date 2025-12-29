@@ -37,27 +37,39 @@ class TrendVIC(BaseModel):
 
 
 class Oscillator(BaseModel):
+    """RSI-based mean reversion model.
+
+    Always predicts UP or DOWN (never FLAT) based on RSI deviation from 50.
+    RSI < 50 -> expect rise (UP), RSI > 50 -> expect fall (DOWN).
+    """
+
     def __init__(self, config: ConfigStore) -> None:
         self.name = "OSCILLATOR"
         self._config = config
 
     def predict(self, features: Dict[str, float]) -> ModelOutput:
-        rsi = features.get("rsi", 0.0)
-        oversold = float(self._config.get("model.rsi_oversold", 30))
-        overbought = float(self._config.get("model.rsi_overbought", 70))
+        rsi = features.get("rsi", 50.0)
 
-        prob_up = 0.5
-        prob_down = 0.5
-        signal = "flat"
-        strength = 0.0
+        # Mean reversion: RSI < 50 -> expect UP, RSI > 50 -> expect DOWN
+        # Strength proportional to deviation from 50
+        deviation = (rsi - 50.0) / 50.0  # -1 to +1
 
-        if rsi <= oversold:
-            strength = clamp(safe_div(oversold - rsi, oversold, 0.0), 0.0, 1.0)
+        # Non-linear strength: amplify extreme values
+        # abs(deviation)^0.7 makes weak signals slightly stronger
+        strength = abs(deviation) ** 0.7
+
+        # Minimum strength to avoid pure 0.5/0.5 (which would be FLAT)
+        min_strength = 0.05
+        strength = max(strength, min_strength)
+        strength = min(strength, 1.0)
+
+        # RSI < 50: expect price to rise (mean reversion UP)
+        # RSI > 50: expect price to fall (mean reversion DOWN)
+        if rsi <= 50:
             prob_up = 0.5 + 0.5 * strength
             prob_down = 1.0 - prob_up
             signal = "up"
-        elif rsi >= overbought:
-            strength = clamp(safe_div(rsi - overbought, 100.0 - overbought, 0.0), 0.0, 1.0)
+        else:
             prob_down = 0.5 + 0.5 * strength
             prob_up = 1.0 - prob_down
             signal = "down"
@@ -66,12 +78,18 @@ class Oscillator(BaseModel):
             model_name=self.name,
             prob_up=prob_up,
             prob_down=prob_down,
-            state={"signal": signal, "strength": strength},
+            state={"signal": signal, "strength": strength, "deviation": deviation},
             metrics={"rsi": rsi},
         )
 
 
 class VolumeMetrix(BaseModel):
+    """Volume-informed momentum model.
+
+    Always predicts UP or DOWN (never FLAT) based on return_1 direction.
+    Strength is modulated by volume_z - higher volume = higher confidence.
+    """
+
     def __init__(self, config: ConfigStore) -> None:
         self.name = "VOLUMEMETRIX"
         self._config = config
@@ -80,8 +98,15 @@ class VolumeMetrix(BaseModel):
         volume_z = features.get("volume_z", 0.0)
         ret = features.get("return_1", 0.0)
         max_z = float(self._config.get("model.volume_z_max", 3.0))
+
+        # Base strength from volume - higher volume = more confidence
         strength = clamp(safe_div(abs(volume_z), max_z, 0.0), 0.0, 1.0)
 
+        # Minimum strength to avoid FLAT (ensures max(prob) >= 0.55)
+        min_strength = 0.15
+        strength = max(strength, min_strength)
+
+        # Direction from return_1 - always UP or DOWN
         if ret >= 0:
             prob_up = 0.5 + 0.5 * strength
             prob_down = 1.0 - prob_up

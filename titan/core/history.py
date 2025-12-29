@@ -8,7 +8,7 @@ from typing import Dict, Optional, Tuple
 
 from titan.core.backtest import run_backtest
 from titan.core.config import ConfigStore
-from titan.core.data.bybit_rest import fetch_klines, interval_to_ms
+from titan.core.data.bybit_rest import fetch_klines, interval_to_ms, validate_candle_continuity
 from titan.core.data.store import CandleStore
 from titan.core.state_store import StateStore
 
@@ -103,7 +103,9 @@ def run_history_backtest(
         volume = int(config_store.get("feature.volume_window", 20))
         vol = int(config_store.get("feature.vol_window", 20))
         rsi = int(config_store.get("feature.rsi_window", 14))
-        prefill_bars = max(slow, volume, vol + 1, rsi + 1)
+        # volatility_z requires: vol_window for returns.std() + vol_window for volatility.std()
+        # So we need 2 * vol_window bars for proper warmup
+        prefill_bars = max(slow, volume, 2 * vol, rsi + 1)
     else:
         if prefill_minutes <= 0:
             prefill_source = "disabled"
@@ -146,6 +148,18 @@ def run_history_backtest(
 
     if verbose:
         print(f"[Download] Received {len(candles):,} candles in {download_time:.1f}s")
+
+    # Check for gaps in candle data
+    gaps, total_missing = validate_candle_continuity(candles, interval_sec)
+    if gaps:
+        if verbose:
+            print(f"[Download] WARNING: Found {len(gaps)} gaps ({total_missing} missing candles)")
+            for gap in gaps[:5]:  # Show first 5 gaps
+                expected_iso = dt.datetime.utcfromtimestamp(gap.expected_ts).isoformat() + "Z"
+                actual_iso = dt.datetime.utcfromtimestamp(gap.actual_ts).isoformat() + "Z"
+                print(f"           Gap: expected {expected_iso}, got {actual_iso} ({gap.missing_count} missing)")
+            if len(gaps) > 5:
+                print(f"           ... and {len(gaps) - 5} more gaps")
 
     os.makedirs(out_dir, exist_ok=True)
     csv_path = os.path.join(out_dir, "candles.csv")
@@ -210,6 +224,8 @@ def run_history_backtest(
         "download_time_sec": round(download_time, 2),
         "price_range": {"min": price_min, "max": price_max},
         "price_change_pct": round(price_change_pct, 4),
+        "gaps_count": len(gaps),
+        "missing_candles": total_missing,
     }
 
     return run_backtest(

@@ -5,6 +5,7 @@ import time
 from typing import Dict, Optional
 
 from titan.core.backtest import BacktestStats, DetailWriter, _evaluate, _model_decision, _tune_weights
+from titan.core.calibration import OnlineCalibrator
 from titan.core.config import ConfigStore
 from titan.core.data.bybit_rest import fetch_klines, interval_to_ms
 from titan.core.data.bybit_ws import BybitSpotWebSocket
@@ -14,7 +15,7 @@ from titan.core.models.heuristic import Oscillator, TrendVIC, VolumeMetrix
 from titan.core.ensemble import Ensemble
 from titan.core.patterns import PatternStore
 from titan.core.state_store import StateStore
-from titan.core.types import PredictionRecord
+from titan.core.types import Decision, PredictionRecord
 from titan.core.weights import WeightManager
 
 
@@ -60,6 +61,7 @@ async def live_loop(
 
     feature_stream = FeatureStream(config_store)
     ensemble = Ensemble(config_store, weight_manager)
+    calibrator = OnlineCalibrator(config_store, state_store)
 
     stats = BacktestStats([model.name for model in models])
     details_path = os.path.join(out_dir, "predictions.jsonl")
@@ -91,6 +93,11 @@ async def live_loop(
 
         if pending is not None:
             outcome = _evaluate(pending, candle.close)
+            raw_confidence = max(pending.decision.prob_up, pending.decision.prob_down)
+            calibrator.update(
+                raw_confidence,
+                pending.decision.direction == outcome.actual_direction,
+            )
             model_decisions: Dict[str, str] = {}
 
             for output in pending.outputs:
@@ -130,7 +137,13 @@ async def live_loop(
                 return True
 
         outputs = [model.predict(features) for model in models]
-        decision = ensemble.decide(outputs)
+        decision = ensemble.decide(outputs, features)
+        decision = Decision(
+            direction=decision.direction,
+            confidence=calibrator.calibrate(decision.confidence),
+            prob_up=decision.prob_up,
+            prob_down=decision.prob_down,
+        )
         conditions = build_conditions(features, config_store)
         pattern_id = pattern_store.get_or_create(conditions)
 
@@ -188,6 +201,7 @@ async def live_loop(
         detail_writer.close()
 
         summary = stats.summary()
+        summary["online_calibration"] = calibrator.summary()
         summary["run_meta"] = {
             "source": "bybit_ws",
             "symbol": symbol,
