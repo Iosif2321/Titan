@@ -5,6 +5,61 @@ from titan.core.state_store import StateStore
 from titan.core.utils import clamp
 
 
+# Regime confidence multipliers - reduce confidence in problematic regimes
+REGIME_CONFIDENCE_MULTIPLIERS = {
+    "trending_up": 1.0,      # Best regime (54% acc), keep confidence
+    "ranging": 0.95,         # Good regime (53.2% acc), slight reduction
+    "trending_down": 0.85,   # Problematic (46.1% acc), reduce more
+    "volatile": 0.75,        # Worst regime (43.7% acc), strong reduction
+}
+
+
+class ConfidenceCompressor:
+    """Compresses overconfident predictions towards 50%.
+
+    Problem: High confidence (65%+) correlates with LOWER accuracy (33-47%).
+    Solution: Compress confidence into a smaller range [0.50, max_confidence].
+    """
+
+    def __init__(self, config: ConfigStore) -> None:
+        self._config = config
+
+    def _enabled(self) -> bool:
+        return bool(self._config.get("confidence_compressor.enabled", True))
+
+    def _max_confidence(self) -> float:
+        return float(self._config.get("confidence_compressor.max_confidence", 0.62))
+
+    def compress(self, confidence: float) -> float:
+        """Compress confidence into range [0.50, max_confidence].
+
+        Maps [0.5, 1.0] -> [0.5, max_confidence] linearly.
+        """
+        if not self._enabled():
+            return confidence
+
+        if confidence <= 0.5:
+            return 0.5
+
+        max_conf = self._max_confidence()
+        # Linear compression: [0.5, 1.0] -> [0.5, max_confidence]
+        excess = confidence - 0.5
+        compressed_excess = excess * (max_conf - 0.5) / 0.5
+        return clamp(0.5 + compressed_excess, 0.5, max_conf)
+
+    def apply_regime_penalty(self, confidence: float, regime: Optional[str]) -> float:
+        """Apply confidence penalty based on regime.
+
+        Reduces confidence in regimes where accuracy is historically low.
+        """
+        if not regime:
+            return confidence
+
+        multiplier = REGIME_CONFIDENCE_MULTIPLIERS.get(regime, 1.0)
+        # Don't let confidence drop below 50%
+        return max(0.50, confidence * multiplier)
+
+
 class OnlineCalibrator:
     def __init__(
         self,

@@ -18,6 +18,12 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "pattern.vol_z_low": -1.0,
     "pattern.volume_z_high": 1.0,
     "pattern.volume_z_low": -1.0,
+    # Sprint 13: Pattern experience adjustment parameters
+    "pattern.boost_threshold": 0.55,
+    "pattern.penalty_threshold": 0.45,
+    "pattern.max_boost": 0.03,
+    "pattern.max_penalty": 0.03,
+    "pattern.bias_penalty": 0.01,
     "ensemble.flat_threshold": 0.55,
     "ensemble.min_margin": 0.05,
     "ensemble.vol_z_high": 1.0,

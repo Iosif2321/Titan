@@ -85,6 +85,11 @@ class FeatureStream:
         self._losses = RollingSum(self._rsi_window)
 
         self._prev_close: Optional[float] = None
+        self._prev_rsi: Optional[float] = None
+
+        # Sprint 10: New feature tracking
+        self._price_history: deque = deque(maxlen=5)  # For price momentum
+        self._volume_history: deque = deque(maxlen=10)  # For volume trend
 
     def update(self, candle: Candle) -> Optional[Dict[str, float]]:
         if self._prev_close is None:
@@ -92,6 +97,8 @@ class FeatureStream:
             self._price_fast.append(candle.close)
             self._price_slow.append(candle.close)
             self._volume.append(candle.volume)
+            self._price_history.append(candle.close)
+            self._volume_history.append(candle.volume)
             return None
 
         ret = (candle.close / self._prev_close) - 1.0
@@ -102,6 +109,10 @@ class FeatureStream:
         self._price_slow.append(candle.close)
         self._returns.append(ret)
         self._volume.append(candle.volume)
+
+        # Sprint 10: Track history for new features
+        self._price_history.append(candle.close)
+        self._volume_history.append(candle.volume)
 
         gain = max(ret, 0.0)
         loss = max(-ret, 0.0)
@@ -148,8 +159,53 @@ class FeatureStream:
         ):
             return None
 
+        # Compute RSI momentum (change in RSI)
+        rsi_val = rsi or 50.0
+        rsi_prev = self._prev_rsi if self._prev_rsi is not None else rsi_val
+        rsi_momentum = rsi_val - rsi_prev
+        self._prev_rsi = rsi_val
+
+        # Sprint 10: Compute new features
+
+        # 1. Price momentum (rate of change over 3 periods)
+        price_momentum_3 = 0.0
+        if len(self._price_history) >= 4:
+            old_price = self._price_history[-4]  # 3 periods ago
+            if old_price > 0:
+                price_momentum_3 = (candle.close - old_price) / old_price
+
+        # 2. Volume trend (recent vs older volume)
+        volume_trend = 0.0
+        if len(self._volume_history) >= 6:
+            recent_vol = sum(list(self._volume_history)[-3:]) / 3
+            older_vol = sum(list(self._volume_history)[-6:-3]) / 3
+            if older_vol > 0:
+                volume_trend = (recent_vol - older_vol) / older_vol
+
+        # 3. Candle body ratio (body size / total range)
+        total_range = candle.high - candle.low
+        body = abs(candle.close - candle.open)
+        body_ratio = body / (total_range + 1e-10)
+
+        # 4. Wick ratios (upper and lower wicks)
+        if candle.close >= candle.open:  # Bullish candle
+            upper_wick = candle.high - candle.close
+            lower_wick = candle.open - candle.low
+        else:  # Bearish candle
+            upper_wick = candle.high - candle.open
+            lower_wick = candle.close - candle.low
+
+        upper_wick_ratio = upper_wick / (total_range + 1e-10)
+        lower_wick_ratio = lower_wick / (total_range + 1e-10)
+
+        # 5. Candle direction (1 = bullish, -1 = bearish)
+        candle_direction = 1.0 if candle.close >= candle.open else -1.0
+
         return {
             "close": candle.close,
+            "open": candle.open,
+            "high": candle.high,
+            "low": candle.low,
             "return_1": ret,
             "log_return_1": log_ret,
             "ma_fast": ma_fast or 0.0,
@@ -160,6 +216,15 @@ class FeatureStream:
             "volume": candle.volume,
             "volume_z": volume_z or 0.0,
             "rsi": rsi or 0.0,
+            "rsi_prev": rsi_prev,
+            "rsi_momentum": rsi_momentum,
+            # Sprint 10: New features
+            "price_momentum_3": price_momentum_3,
+            "volume_trend": volume_trend,
+            "body_ratio": body_ratio,
+            "upper_wick_ratio": upper_wick_ratio,
+            "lower_wick_ratio": lower_wick_ratio,
+            "candle_direction": candle_direction,
         }
 
 

@@ -6,6 +6,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
+from titan.core.adapters.pattern import PatternAdjuster
 from titan.core.analysis import PredictionAnalyzer, PredictionDetail, StatisticalValidator
 from titan.core.calibration import OnlineCalibrator
 from titan.core.config import ConfigStore
@@ -14,7 +15,7 @@ from titan.core.features.stream import FeatureStream, build_conditions
 from titan.core.models.heuristic import Oscillator, TrendVIC, VolumeMetrix
 from titan.core.ensemble import Ensemble
 from titan.core.monitor import PerformanceMonitor
-from titan.core.patterns import PatternStore
+from titan.core.patterns import PatternExperience, PatternStore
 from titan.core.regime import RegimeDetector
 from titan.core.state_store import StateStore
 from titan.core.types import Decision, ModelOutput, Outcome, PredictionRecord
@@ -1263,6 +1264,10 @@ def run_backtest(
     config_store.ensure_defaults()
     pattern_store = PatternStore(db_path)
 
+    # Sprint 13: Create pattern experience and adjuster
+    pattern_experience = PatternExperience(pattern_store)
+    pattern_adjuster = PatternAdjuster(pattern_experience, config_store)
+
     # Create regime detector and performance monitor
     regime_detector = RegimeDetector(config_store)
     performance_monitor = PerformanceMonitor(window=100)
@@ -1282,7 +1287,12 @@ def run_backtest(
     ]
 
     feature_stream = FeatureStream(config_store)
-    ensemble = Ensemble(config_store, weight_manager, regime_detector=regime_detector)
+    ensemble = Ensemble(
+        config_store,
+        weight_manager,
+        regime_detector=regime_detector,
+        pattern_adjuster=pattern_adjuster,
+    )
     calibrator = OnlineCalibrator(config_store)
 
     # Extract interval from run_meta for proper Sharpe/Sortino annualization
@@ -1405,18 +1415,26 @@ def run_backtest(
             else:
                 skipped_predictions += 1
 
+        # Get pattern_id first so we can pass it to ensemble.decide()
+        pattern_id = -1
+        if _in_target(candle.ts):
+            conditions = build_conditions(features, config_store)
+            pattern_id = pattern_store.get_or_create(conditions)
+
         outputs = [model.predict(features) for model in models]
-        decision = ensemble.decide(outputs, features)
+        # Sprint 13: Pass pattern_id for experience-based adjustment
+        decision = ensemble.decide(
+            outputs,
+            features,
+            ts=candle.ts,
+            pattern_id=pattern_id if pattern_id > 0 else None,
+        )
         decision = Decision(
             direction=decision.direction,
             confidence=calibrator.calibrate(decision.confidence),
             prob_up=decision.prob_up,
             prob_down=decision.prob_down,
         )
-        pattern_id = -1
-        if _in_target(candle.ts):
-            conditions = build_conditions(features, config_store)
-            pattern_id = pattern_store.get_or_create(conditions)
 
         pending = PredictionRecord(
             ts=candle.ts,

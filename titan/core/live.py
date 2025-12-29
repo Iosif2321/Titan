@@ -4,6 +4,7 @@ import os
 import time
 from typing import Dict, Optional
 
+from titan.core.adapters.pattern import PatternAdjuster
 from titan.core.backtest import BacktestStats, DetailWriter, _evaluate, _model_decision, _tune_weights
 from titan.core.calibration import OnlineCalibrator
 from titan.core.config import ConfigStore
@@ -13,7 +14,7 @@ from titan.core.data.store import CandleStore
 from titan.core.features.stream import FeatureStream, build_conditions
 from titan.core.models.heuristic import Oscillator, TrendVIC, VolumeMetrix
 from titan.core.ensemble import Ensemble
-from titan.core.patterns import PatternStore
+from titan.core.patterns import PatternExperience, PatternStore
 from titan.core.state_store import StateStore
 from titan.core.types import Decision, PredictionRecord
 from titan.core.weights import WeightManager
@@ -53,6 +54,10 @@ async def live_loop(
     pattern_store = PatternStore(db_path)
     candle_store = CandleStore(db_path) if store_candles else None
 
+    # Sprint 13: Create pattern experience and adjuster
+    pattern_experience = PatternExperience(pattern_store)
+    pattern_adjuster = PatternAdjuster(pattern_experience, config_store)
+
     models = [
         TrendVIC(config_store),
         Oscillator(config_store),
@@ -60,7 +65,7 @@ async def live_loop(
     ]
 
     feature_stream = FeatureStream(config_store)
-    ensemble = Ensemble(config_store, weight_manager)
+    ensemble = Ensemble(config_store, weight_manager, pattern_adjuster=pattern_adjuster)
     calibrator = OnlineCalibrator(config_store, state_store)
 
     stats = BacktestStats([model.name for model in models])
@@ -136,16 +141,21 @@ async def live_loop(
             if max_predictions is not None and evaluated >= max_predictions:
                 return True
 
+        # Get pattern_id first so we can pass it to ensemble.decide()
+        conditions = build_conditions(features, config_store)
+        pattern_id = pattern_store.get_or_create(conditions)
+
         outputs = [model.predict(features) for model in models]
-        decision = ensemble.decide(outputs, features)
+        # Sprint 13: Pass pattern_id for experience-based adjustment
+        decision = ensemble.decide(
+            outputs, features, ts=candle.ts, pattern_id=pattern_id
+        )
         decision = Decision(
             direction=decision.direction,
             confidence=calibrator.calibrate(decision.confidence),
             prob_up=decision.prob_up,
             prob_down=decision.prob_down,
         )
-        conditions = build_conditions(features, config_store)
-        pattern_id = pattern_store.get_or_create(conditions)
 
         pending = PredictionRecord(
             ts=candle.ts,

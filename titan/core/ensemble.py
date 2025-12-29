@@ -1,11 +1,16 @@
 from typing import TYPE_CHECKING, Dict, List, Optional, Union
 
+from titan.core.adapters.temporal import TemporalAdjuster
+from titan.core.calibration import ConfidenceCompressor
 from titan.core.config import ConfigStore
+from titan.core.strategies.trending import TrendingStrategy
+from titan.core.strategies.volatile import VolatileStrategy
 from titan.core.types import Decision, ModelOutput
 from titan.core.utils import clamp
 from titan.core.weights import AdaptiveWeightManager, WeightManager
 
 if TYPE_CHECKING:
+    from titan.core.adapters.pattern import PatternAdjuster
     from titan.core.regime import RegimeDetector
 
 
@@ -13,6 +18,11 @@ class Ensemble:
     """Combines multiple model outputs into a single decision.
 
     Supports regime-aware weighting when using AdaptiveWeightManager.
+    Now includes confidence compression to fix overconfidence problem.
+    Includes specialized handling for volatile and trending regimes.
+    Includes temporal adjustments for hour-based accuracy patterns.
+    Sprint 11: Includes agreement boost for when models agree.
+    Sprint 13: Includes pattern experience for historical performance.
     """
 
     def __init__(
@@ -20,22 +30,78 @@ class Ensemble:
         config: ConfigStore,
         weights: Union[WeightManager, AdaptiveWeightManager],
         regime_detector: Optional["RegimeDetector"] = None,
+        pattern_adjuster: Optional["PatternAdjuster"] = None,
     ) -> None:
         self._config = config
         self._weights = weights
         self._regime_detector = regime_detector
+        self._pattern_adjuster = pattern_adjuster
         self._last_regime: Optional[str] = None
+        self._compressor = ConfidenceCompressor(config)
+        self._volatile_strategy = VolatileStrategy(config)
+        self._trending_strategy = TrendingStrategy(config)
+        self._temporal = TemporalAdjuster(config)
+
+    def _check_agreement(self, outputs: List[ModelOutput]) -> str:
+        """Check model agreement level.
+
+        Returns:
+            'full' - all models agree
+            'partial' - majority agrees (2 out of 3)
+            'none' - no clear agreement
+        """
+        if len(outputs) < 2:
+            return "none"
+
+        directions = []
+        for o in outputs:
+            if o.prob_up > o.prob_down:
+                directions.append("UP")
+            else:
+                directions.append("DOWN")
+
+        up_count = sum(1 for d in directions if d == "UP")
+        down_count = len(directions) - up_count
+
+        if up_count == len(directions) or down_count == len(directions):
+            return "full"
+        elif up_count >= 2 or down_count >= 2:
+            return "partial"
+        return "none"
+
+    def _apply_agreement_boost(
+        self, confidence: float, outputs: List[ModelOutput]
+    ) -> float:
+        """Boost confidence when models agree.
+
+        Sprint 11: Full agreement → +5% confidence
+                   Partial agreement → +2% confidence
+        """
+        agreement = self._check_agreement(outputs)
+
+        full_boost = float(self._config.get("ensemble.agreement_full_boost", 0.05))
+        partial_boost = float(self._config.get("ensemble.agreement_partial_boost", 0.02))
+
+        if agreement == "full":
+            return min(confidence + full_boost, 0.65)  # Cap at 65%
+        elif agreement == "partial":
+            return min(confidence + partial_boost, 0.62)  # Cap at 62%
+        return confidence
 
     def decide(
         self,
         outputs: List[ModelOutput],
         features: Optional[Dict[str, float]] = None,
+        ts: Optional[int] = None,
+        pattern_id: Optional[int] = None,
     ) -> Decision:
         """Make ensemble decision from model outputs.
 
         Args:
             outputs: List of model predictions
             features: Current market features (used for regime detection)
+            ts: Unix timestamp for temporal adjustments
+            pattern_id: Current pattern ID for experience-based adjustment
 
         Returns:
             Combined decision with direction, confidence, and probabilities
@@ -45,6 +111,41 @@ class Ensemble:
         if features and self._regime_detector:
             regime = self._regime_detector.detect(features)
             self._last_regime = regime
+
+        # Special handling for volatile regime (55%+ error rate)
+        if regime == "volatile" and features:
+            volatile_decision = self._volatile_strategy.decide(features)
+            if volatile_decision:
+                # Apply compression and regime penalty even to volatile decisions
+                final_conf = self._compressor.compress(volatile_decision.confidence)
+                final_conf = self._compressor.apply_regime_penalty(final_conf, regime)
+                return Decision(
+                    direction=volatile_decision.direction,
+                    confidence=clamp(final_conf, 0.0, 1.0),
+                    prob_up=volatile_decision.prob_up,
+                    prob_down=volatile_decision.prob_down,
+                )
+
+        # Special handling for trending_down regime (53%+ error rate)
+        # Uses exhaustion detection to predict reversals
+        if regime == "trending_down" and features:
+            # Update trending strategy with current features
+            self._trending_strategy.update(features)
+
+            # Get base direction hint (simple majority from outputs)
+            up_count = sum(1 for o in outputs if o.prob_up > o.prob_down)
+            base_dir = "UP" if up_count > len(outputs) / 2 else "DOWN"
+
+            trending_decision = self._trending_strategy.decide(features, regime, base_dir)
+            if trending_decision:
+                final_conf = self._compressor.compress(trending_decision.confidence)
+                final_conf = self._compressor.apply_regime_penalty(final_conf, regime)
+                return Decision(
+                    direction=trending_decision.direction,
+                    confidence=clamp(final_conf, 0.0, 1.0),
+                    prob_up=trending_decision.prob_up,
+                    prob_down=trending_decision.prob_down,
+                )
 
         # Get weights - regime-aware if using AdaptiveWeightManager
         if isinstance(self._weights, AdaptiveWeightManager) and regime:
@@ -110,12 +211,34 @@ class Ensemble:
             # Use the raw weighted values to break ties
             direction = "UP" if weighted_up >= weighted_down else "DOWN"
 
-        return Decision(
+        # Apply confidence compression to fix overconfidence problem
+        # High confidence (65%+) historically has LOWER accuracy (33-47%)
+        final_confidence = self._compressor.compress(confidence)
+
+        # Sprint 11: Apply agreement boost (when models agree, boost confidence)
+        final_confidence = self._apply_agreement_boost(final_confidence, outputs)
+
+        # Apply regime-based penalty (volatile/trending_down are problematic)
+        final_confidence = self._compressor.apply_regime_penalty(final_confidence, regime)
+
+        # Apply temporal adjustment (some hours have historically worse accuracy)
+        final_confidence = self._temporal.adjust_confidence(final_confidence, ts)
+
+        # Build decision
+        decision = Decision(
             direction=direction,
-            confidence=clamp(confidence, 0.0, 1.0),
+            confidence=clamp(final_confidence, 0.0, 1.0),
             prob_up=clamp(prob_up, 0.0, 1.0),
             prob_down=clamp(prob_down, 0.0, 1.0),
         )
+
+        # Sprint 13: Apply pattern experience adjustment
+        if self._pattern_adjuster and pattern_id is not None:
+            decision = self._pattern_adjuster.adjust_decision(
+                decision, pattern_id, features
+            )
+
+        return decision
 
     def get_last_regime(self) -> Optional[str]:
         """Get the last detected market regime.
