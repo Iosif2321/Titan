@@ -233,9 +233,10 @@ class Ensemble:
         )
 
         # Sprint 13: Apply pattern experience adjustment
+        # FIXED: Pass max_ts=ts to prevent data leakage in backtest
         if self._pattern_adjuster and pattern_id is not None:
             decision = self._pattern_adjuster.adjust_decision(
-                decision, pattern_id, features
+                decision, pattern_id, features, max_ts=ts
             )
 
         return decision

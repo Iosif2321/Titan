@@ -228,7 +228,22 @@ class FeatureStream:
         }
 
 
-def build_conditions(features: Dict[str, float], config: ConfigStore) -> Dict[str, str]:
+def build_conditions(
+    features: Dict[str, float],
+    config: ConfigStore,
+    ts: Optional[int] = None,
+) -> Dict[str, str]:
+    """Build pattern conditions from features.
+
+    Args:
+        features: Current market features
+        config: Configuration store
+        ts: Optional timestamp for extended conditions (hour, session, day_of_week)
+
+    Returns:
+        Conditions dict with trend, volatility, volume, and optionally
+        hour, session, day_of_week if ts is provided.
+    """
     trend_eps_mult = float(config.get("pattern.trend_eps_mult", 0.5))
     trend_eps = abs(features.get("volatility", 0.0) * features.get("close", 0.0)) * trend_eps_mult
     ma_delta = features.get("ma_delta", 0.0)
@@ -260,8 +275,24 @@ def build_conditions(features: Dict[str, float], config: ConfigStore) -> Dict[st
     else:
         volume = "mid"
 
-    return {
+    conditions: Dict[str, str] = {
         "trend": trend,
         "volatility": volatility,
         "volume": volume,
     }
+
+    # Add extended conditions if timestamp provided
+    if ts is not None:
+        from datetime import datetime
+        from titan.core.patterns import get_trading_session
+
+        dt = datetime.utcfromtimestamp(ts)
+        hour_bucket = int(config.get("pattern.hour_bucket_size", 1))
+        hour = dt.hour
+        if hour_bucket > 1:
+            hour = (hour // hour_bucket) * hour_bucket
+        conditions["hour"] = str(hour)
+        conditions["session"] = get_trading_session(hour)
+        conditions["day_of_week"] = str(dt.weekday())
+
+    return conditions

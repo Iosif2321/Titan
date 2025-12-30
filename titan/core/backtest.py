@@ -6,7 +6,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
-from titan.core.adapters.pattern import PatternAdjuster
+from titan.core.adapters.pattern import PatternAdjuster, PatternModelAdjuster, PatternReader
 from titan.core.analysis import PredictionAnalyzer, PredictionDetail, StatisticalValidator
 from titan.core.calibration import OnlineCalibrator
 from titan.core.config import ConfigStore
@@ -18,7 +18,7 @@ from titan.core.monitor import PerformanceMonitor
 from titan.core.patterns import PatternExperience, PatternStore
 from titan.core.regime import RegimeDetector
 from titan.core.state_store import StateStore
-from titan.core.types import Decision, ModelOutput, Outcome, PredictionRecord
+from titan.core.types import Decision, ModelOutput, Outcome, PatternContext, PredictionRecord
 from titan.core.weights import AdaptiveWeightManager, WeightManager
 
 
@@ -1262,11 +1262,19 @@ def run_backtest(
     state_store = StateStore(db_path)
     config_store = ConfigStore(state_store)
     config_store.ensure_defaults()
-    pattern_store = PatternStore(db_path)
+    # Sprint 12: Pass config for config-driven pattern behavior
+    pattern_store = PatternStore(db_path, config=config_store)
 
     # Sprint 13: Create pattern experience and adjuster
     pattern_experience = PatternExperience(pattern_store)
-    pattern_adjuster = PatternAdjuster(pattern_experience, config_store)
+    pattern_adjuster = PatternAdjuster(
+        pattern_experience, config_store, model_name="ENSEMBLE"
+    )
+    pattern_reader = PatternReader(pattern_store, config_store)
+    pattern_model_adjuster = PatternModelAdjuster(pattern_reader, config_store)
+    model_adjuster_enabled = bool(
+        config_store.get("pattern.model_adjuster_enabled", False)
+    )
 
     # Create regime detector and performance monitor
     regime_detector = RegimeDetector(config_store)
@@ -1371,6 +1379,7 @@ def run_backtest(
                     )
 
                     event = {
+                        "price": pending.price,
                         "model_state": output.state,
                         "forecast": {
                             "prob_up": output.prob_up,
@@ -1386,12 +1395,39 @@ def run_backtest(
                         },
                         "regime": pending_regime,
                     }
+                    # Sprint 12: Pass features_snapshot for 100% storage
                     pattern_store.record_usage(
                         pending.pattern_id,
                         output.model_name,
                         event,
                         event_ts=pending.ts,
+                        features_snapshot=pending.features,
                     )
+
+                ensemble_event = {
+                    "price": pending.price,
+                    "model_state": {"ensemble": True},
+                    "forecast": {
+                        "prob_up": pending.decision.prob_up,
+                        "prob_down": pending.decision.prob_down,
+                        "direction": pending.decision.direction,
+                    },
+                    "metrics": {},
+                    "outcome": {
+                        "actual_direction": outcome.actual_direction,
+                        "price_delta": outcome.price_delta,
+                        "return_pct": outcome.return_pct,
+                        "hit": pending.decision.direction == outcome.actual_direction,
+                    },
+                    "regime": pending_regime,
+                }
+                pattern_store.record_usage(
+                    pending.pattern_id,
+                    "ENSEMBLE",
+                    ensemble_event,
+                    event_ts=pending.ts,
+                    features_snapshot=pending.features,
+                )
 
                 stats.update(pending, outcome, model_decisions, regime=pending_regime)
                 feature_analyzer.update(pending.features, outcome.actual_direction, model_decisions)
@@ -1416,12 +1452,35 @@ def run_backtest(
                 skipped_predictions += 1
 
         # Get pattern_id first so we can pass it to ensemble.decide()
+        # Sprint 12: Pass ts for extended conditions (hour, session, day_of_week)
+        conditions = None
         pattern_id = -1
         if _in_target(candle.ts):
-            conditions = build_conditions(features, config_store)
-            pattern_id = pattern_store.get_or_create(conditions)
+            conditions = build_conditions(features, config_store, ts=candle.ts)
+            pattern_id = pattern_store.get_or_create(conditions, ts=candle.ts)
 
-        outputs = [model.predict(features) for model in models]
+        pattern_contexts: Dict[str, Optional[PatternContext]] = {}
+        if pattern_id > 0 and conditions is not None:
+            for model in models:
+                pattern_contexts[model.name] = pattern_reader.build_context(
+                    pattern_id,
+                    features,
+                    ts=candle.ts,
+                    model_name=model.name,
+                    conditions=conditions,
+                )
+
+        outputs = [
+            model.predict(features, pattern_context=pattern_contexts.get(model.name))
+            for model in models
+        ]
+        if pattern_id > 0 and model_adjuster_enabled:
+            outputs = [
+                pattern_model_adjuster.adjust_model_output(
+                    output, pattern_id, conditions=conditions, ts=candle.ts
+                )
+                for output in outputs
+            ]
         # Sprint 13: Pass pattern_id for experience-based adjustment
         decision = ensemble.decide(
             outputs,
@@ -1474,6 +1533,10 @@ def run_backtest(
         tuned = _tune_weights(stats, config_store)
         weight_manager.set_model_weights(tuned)
         summary["tuned_weights"] = tuned
+
+    # Sprint 12: Run pattern lifecycle maintenance
+    lifecycle = pattern_store.run_lifecycle_maintenance()
+    summary["pattern_lifecycle"] = lifecycle
 
     summary_path = os.path.join(out_dir, "summary.json")
     with open(summary_path, "w", encoding="utf-8") as handle:

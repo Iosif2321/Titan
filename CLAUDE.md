@@ -429,6 +429,35 @@ Models → Ensemble.decide(outputs, features, ts, pattern_id)
 
 ---
 
+## Current Sprint: Sprint 12 - Pattern System Hardening (2025-12-29)
+
+### Critical Bugs Found
+1. **Snapshot deletion corrupts other patterns** (`patterns.py:920`)
+   - `_enforce_decision_limit()` deletes snapshots of OTHER patterns
+   - Fix: Delete only snapshots of events being removed
+
+2. **Data leakage in backtest** (`patterns.py:1247`)
+   - `PatternExperience.get_pattern_stats()` sees "future" events
+   - Fix: Add `max_ts` parameter to filter by timestamp
+
+### Refactoring Tasks
+- Config-driven constants (MAX_DECISIONS, etc.)
+- Fix day_of_week inconsistency (in ExtendedConditions but not in pattern_key)
+- Remove dead code (pattern_conditions_v2, conditions_version unused)
+- Integrate PatternReader into ensemble
+
+### Sprint 12 Plan
+| Phase | Task | Status |
+|-------|------|--------|
+| A.1 | Fix snapshot deletion bug | Pending |
+| A.2 | Fix data leakage (time-bounded) | Pending |
+| B.1 | Config-driven constants | Pending |
+| B.2 | day_of_week consistency | Pending |
+| B.3 | Remove dead code | Pending |
+| C | Update ROADMAP, run backtest | Pending |
+
+---
+
 ## Last Session Context (2025-12-29)
 
 ### Completed
@@ -436,11 +465,6 @@ Models → Ensemble.decide(outputs, features, ts, pattern_id)
 - PatternExperience with time decay working
 - PatternAdjuster integrated in Ensemble, backtest, live
 - Test passed: 52.12% accuracy, ECE 1.92%, Sharpe 2.55
-
-### Next Task
-- Sprint 12: ML Model (LightGBM/XGBoost)
-- Add ML predictor that learns from features + model outputs
-- Online learning for continuous adaptation
 
 ### Latest Test Results
 ```

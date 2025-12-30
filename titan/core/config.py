@@ -24,6 +24,23 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "pattern.max_boost": 0.03,
     "pattern.max_penalty": 0.03,
     "pattern.bias_penalty": 0.01,
+    "pattern.bias_threshold": 0.05,
+    # Sprint 12: Enhanced pattern system
+    "pattern.conditions_version": 2,
+    "pattern.hour_bucket_size": 1,  # Each hour separately (0-23)
+    "pattern.snapshot_rate": 1.0,  # Store full snapshots for ALL events
+    "pattern.high_conf_threshold": 0.65,
+    "pattern.max_decisions": 50000,  # Max decisions per pattern
+    "pattern.top_decisions_count": 1000,  # Always keep top N brightest
+    "pattern.min_match_ratio": 0.8,  # 80% condition match for fuzzy search
+    "pattern.inactive_after_days": 30,  # Move to inactive after 30 days unused
+    "pattern.delete_after_days": 90,  # Delete after 90 days in inactive
+    "pattern.model_adjuster_enabled": False,
+    "pattern.include_ensemble_in_global": False,
+    # PatternReader adjustments
+    "pattern_reader.max_confidence_boost": 0.03,
+    "pattern_reader.max_confidence_penalty": 0.05,
+    "pattern_reader.bias_flip_threshold": 0.15,
     "ensemble.flat_threshold": 0.55,
     "ensemble.min_margin": 0.05,
     "ensemble.vol_z_high": 1.0,

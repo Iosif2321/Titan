@@ -4,7 +4,7 @@ import os
 import time
 from typing import Dict, Optional
 
-from titan.core.adapters.pattern import PatternAdjuster
+from titan.core.adapters.pattern import PatternAdjuster, PatternModelAdjuster, PatternReader
 from titan.core.backtest import BacktestStats, DetailWriter, _evaluate, _model_decision, _tune_weights
 from titan.core.calibration import OnlineCalibrator
 from titan.core.config import ConfigStore
@@ -16,7 +16,7 @@ from titan.core.models.heuristic import Oscillator, TrendVIC, VolumeMetrix
 from titan.core.ensemble import Ensemble
 from titan.core.patterns import PatternExperience, PatternStore
 from titan.core.state_store import StateStore
-from titan.core.types import Decision, PredictionRecord
+from titan.core.types import Decision, PatternContext, PredictionRecord
 from titan.core.weights import WeightManager
 
 
@@ -51,12 +51,20 @@ async def live_loop(
         _apply_overrides(config_store, overrides)
 
     weight_manager = WeightManager(state_store)
-    pattern_store = PatternStore(db_path)
+    # Sprint 12: Pass config for config-driven pattern behavior
+    pattern_store = PatternStore(db_path, config=config_store)
     candle_store = CandleStore(db_path) if store_candles else None
 
     # Sprint 13: Create pattern experience and adjuster
     pattern_experience = PatternExperience(pattern_store)
-    pattern_adjuster = PatternAdjuster(pattern_experience, config_store)
+    pattern_adjuster = PatternAdjuster(
+        pattern_experience, config_store, model_name="ENSEMBLE"
+    )
+    pattern_reader = PatternReader(pattern_store, config_store)
+    pattern_model_adjuster = PatternModelAdjuster(pattern_reader, config_store)
+    model_adjuster_enabled = bool(
+        config_store.get("pattern.model_adjuster_enabled", False)
+    )
 
     models = [
         TrendVIC(config_store),
@@ -109,6 +117,7 @@ async def live_loop(
                 model_direction = _model_decision(output, config_store)
                 model_decisions[output.model_name] = model_direction
                 event = {
+                    "price": pending.price,
                     "model_state": output.state,
                     "forecast": {
                         "prob_up": output.prob_up,
@@ -123,12 +132,38 @@ async def live_loop(
                         "hit": model_direction == outcome.actual_direction,
                     },
                 }
+                # Sprint 12: Pass features_snapshot for 100% storage
                 pattern_store.record_usage(
                     pending.pattern_id,
                     output.model_name,
                     event,
                     event_ts=pending.ts,
+                    features_snapshot=pending.features,
                 )
+
+            ensemble_event = {
+                "price": pending.price,
+                "model_state": {"ensemble": True},
+                "forecast": {
+                    "prob_up": pending.decision.prob_up,
+                    "prob_down": pending.decision.prob_down,
+                    "direction": pending.decision.direction,
+                },
+                "metrics": {},
+                "outcome": {
+                    "actual_direction": outcome.actual_direction,
+                    "price_delta": outcome.price_delta,
+                    "return_pct": outcome.return_pct,
+                    "hit": pending.decision.direction == outcome.actual_direction,
+                },
+            }
+            pattern_store.record_usage(
+                pending.pattern_id,
+                "ENSEMBLE",
+                ensemble_event,
+                event_ts=pending.ts,
+                features_snapshot=pending.features,
+            )
 
             stats.update(pending, outcome, model_decisions)
             detail_writer.write(pending, outcome, model_decisions)
@@ -142,10 +177,31 @@ async def live_loop(
                 return True
 
         # Get pattern_id first so we can pass it to ensemble.decide()
-        conditions = build_conditions(features, config_store)
-        pattern_id = pattern_store.get_or_create(conditions)
+        # Sprint 12: Pass ts for extended conditions (hour, session, day_of_week)
+        conditions = build_conditions(features, config_store, ts=candle.ts)
+        pattern_id = pattern_store.get_or_create(conditions, ts=candle.ts)
 
-        outputs = [model.predict(features) for model in models]
+        pattern_contexts: Dict[str, Optional[PatternContext]] = {}
+        for model in models:
+            pattern_contexts[model.name] = pattern_reader.build_context(
+                pattern_id,
+                features,
+                ts=candle.ts,
+                model_name=model.name,
+                conditions=conditions,
+            )
+
+        outputs = [
+            model.predict(features, pattern_context=pattern_contexts.get(model.name))
+            for model in models
+        ]
+        if model_adjuster_enabled:
+            outputs = [
+                pattern_model_adjuster.adjust_model_output(
+                    output, pattern_id, conditions=conditions, ts=candle.ts
+                )
+                for output in outputs
+            ]
         # Sprint 13: Pass pattern_id for experience-based adjustment
         decision = ensemble.decide(
             outputs, features, ts=candle.ts, pattern_id=pattern_id
@@ -233,6 +289,10 @@ async def live_loop(
             summary["run_meta"]["config_overrides"] = overrides
 
         summary["weights"] = weight_manager.get_model_weights()
+
+        # Sprint 12: Run pattern lifecycle maintenance
+        lifecycle = pattern_store.run_lifecycle_maintenance()
+        summary["pattern_lifecycle"] = lifecycle
 
         summary_path = os.path.join(out_dir, "summary.json")
         with open(summary_path, "w", encoding="utf-8") as handle:

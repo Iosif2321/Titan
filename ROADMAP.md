@@ -1086,6 +1086,73 @@ def get_pattern_stats_with_decay(
 
 ---
 
+## SPRINT 12: Pattern System Hardening (IN PROGRESS)
+
+### Проблема
+При анализе Sprint 13 обнаружены критические баги и технический долг:
+
+### 12.1 Критический баг: Удаление чужих snapshots
+**Файл:** `titan/core/patterns.py:917-926`
+
+```python
+# БЫЛО (БАГ):
+DELETE FROM pattern_event_snapshots
+WHERE event_id NOT IN (
+    SELECT id FROM pattern_events WHERE pattern_id = ?
+)
+# Удаляет snapshots ВСЕХ паттернов кроме текущего!
+
+# ДОЛЖНО БЫТЬ:
+# 1. Собрать ID событий для удаления
+# 2. Удалить их snapshots
+# 3. Удалить сами события
+```
+
+### 12.2 Критический баг: Data Leakage
+**Файл:** `titan/core/patterns.py:1247`
+
+```python
+# БЫЛО (БАГ):
+events = self._store.get_events(pattern_id)  # Видит "будущие" события!
+
+# ДОЛЖНО БЫТЬ:
+events = self._store.get_events(pattern_id, max_ts=current_ts)
+```
+
+### 12.3 Рефакторинг: Config-driven константы
+**Файл:** `titan/core/patterns.py:11-15`
+
+```python
+# БЫЛО (жёстко):
+MAX_DECISIONS = 50000
+TOP_DECISIONS_COUNT = 1000
+INACTIVE_AFTER_DAYS = 30
+
+# ДОЛЖНО БЫТЬ:
+max_decisions = int(config.get("pattern.max_decisions", 50000))
+```
+
+### 12.4 Рефакторинг: day_of_week consistency
+- `ExtendedConditions` имеет `day_of_week`
+- `build_pattern_key()` НЕ включает его
+- `pattern_search_index` НЕ имеет колонку
+- **Решение:** Либо добавить везде, либо убрать из hash
+
+### 12.5 Рефакторинг: Удаление мёртвого кода
+- `pattern_conditions_v2` — таблица создаётся, но не используется
+- `conditions_version` — колонка есть, всегда = 1
+- `momentum`, `rsi_zone` — в схеме, не используются
+
+### 12.6 Критерии успеха Sprint 12
+- [ ] Баг snapshot deletion исправлен
+- [ ] Data leakage исправлен (time-bounded queries)
+- [ ] Константы читаются из конфига
+- [ ] day_of_week согласован (или удалён)
+- [ ] Мёртвый код удалён
+- [ ] **ТЕСТ:** Backtest проходит без регрессии
+
+---
+
 ## Приоритеты реализации
 
 | Приоритет | Sprint | Ожидаемый эффект | Статус |
@@ -1097,8 +1164,9 @@ def get_pattern_stats_with_decay(
 | 5 | Sprint 9: Model Improvements | Per-model acc > 48% | ✅ Done |
 | 6 | Sprint 10: Features | Better correlations | ✅ Done |
 | 7 | Sprint 11: Ensemble | Agreement acc > 55% | ✅ Done (55.77%) |
-| 8 | Sprint 12: ML | Overall acc > 52% | ⏳ Next |
-| 9 | Sprint 13: Pattern System | Pattern-based accuracy boost | ✅ Done |
+| 8 | Sprint 13: Pattern System | Pattern-based accuracy boost | ✅ Done |
+| 9 | **Sprint 12: Hardening** | Bug fixes, data integrity | 🔄 In Progress |
+| 10 | Sprint 14: ML Model | Overall acc > 55% | ⏳ Next |
 
 ---
 

@@ -1,9 +1,74 @@
-from typing import Dict
+from typing import Dict, Optional, Sequence
 
 from titan.core.config import ConfigStore
 from titan.core.models.base import BaseModel
-from titan.core.types import ModelOutput
+from titan.core.types import ModelOutput, PatternContext
 from titan.core.utils import clamp, safe_div
+
+
+def _pattern_state_summary(context: PatternContext) -> Dict[str, object]:
+    return {
+        "pattern_id": context.pattern_id,
+        "pattern_key": context.pattern_key,
+        "match_ratio": context.match_ratio,
+        "accuracy": context.accuracy,
+        "bias": context.bias,
+        "trust_confidence": context.trust_confidence,
+    }
+
+
+def _apply_pattern_context_strength(
+    strength: float,
+    direction: str,
+    context: Optional[PatternContext],
+    feature_keys: Sequence[str],
+) -> float:
+    if not context:
+        return strength
+
+    scale = 1.0
+    trust = context.trust_confidence
+
+    if context.bias:
+        if context.bias == direction:
+            scale *= 1.0 + (0.05 * trust)
+        else:
+            scale *= 1.0 - (0.05 * trust)
+
+    for key in feature_keys:
+        insight = context.feature_insights.get(key)
+        if not insight:
+            continue
+        acc = float(insight.get("accuracy", 0.5))
+        if acc > 0.55:
+            scale *= 1.0 + (0.05 * trust)
+        elif acc < 0.45:
+            scale *= 1.0 - (0.05 * trust)
+
+    for key in ("session", "hour"):
+        insight = context.temporal_insights.get(key)
+        if not insight:
+            continue
+        acc = float(insight.get("accuracy", 0.5))
+        if acc > 0.55:
+            scale *= 1.0 + (0.03 * trust)
+        elif acc < 0.45:
+            scale *= 1.0 - (0.03 * trust)
+
+    # Prevent excessive strength reduction - minimum scale 0.7
+    # This avoids vicious cycle: low accuracy -> low strength -> FLAT -> lower accuracy
+    scale = max(scale, 0.7)
+
+    strength = clamp(strength * scale, 0.0, 0.5)
+
+    if context.confidence_cap is not None:
+        # confidence_cap = max allowed probability
+        # prob = 0.5 + 0.5 * strength
+        # cap_strength = (confidence_cap - 0.5) * 2
+        cap_strength = max((context.confidence_cap - 0.5) * 2, 0.0)
+        strength = min(strength, cap_strength)
+
+    return strength
 
 
 class TrendVIC(BaseModel):
@@ -17,7 +82,11 @@ class TrendVIC(BaseModel):
         self.name = "TRENDVIC"
         self._config = config
 
-    def predict(self, features: Dict[str, float]) -> ModelOutput:
+    def predict(
+        self,
+        features: Dict[str, float],
+        pattern_context: Optional[PatternContext] = None,
+    ) -> ModelOutput:
         ma_delta = features.get("ma_delta", 0.0)
         volatility = features.get("volatility", 0.0)
         close = features.get("close", 0.0)
@@ -56,11 +125,29 @@ class TrendVIC(BaseModel):
             prob_up = 1.0 - prob_down
             signal = "down"
 
+        direction = "UP" if prob_up >= prob_down else "DOWN"
+        strength = _apply_pattern_context_strength(
+            strength,
+            direction,
+            pattern_context,
+            feature_keys=("volatility_z", "body_ratio"),
+        )
+        if direction == "UP":
+            prob_up = 0.5 + 0.5 * strength
+            prob_down = 1.0 - prob_up
+        else:
+            prob_down = 0.5 + 0.5 * strength
+            prob_up = 1.0 - prob_down
+
+        state = {"signal": signal, "strength": strength, "confirmation": confirmation}
+        if pattern_context:
+            state["pattern"] = _pattern_state_summary(pattern_context)
+
         return ModelOutput(
             model_name=self.name,
             prob_up=prob_up,
             prob_down=prob_down,
-            state={"signal": signal, "strength": strength, "confirmation": confirmation},
+            state=state,
             metrics={"ma_delta": ma_delta, "body_ratio": body_ratio},
         )
 
@@ -78,7 +165,11 @@ class Oscillator(BaseModel):
         self.name = "OSCILLATOR"
         self._config = config
 
-    def predict(self, features: Dict[str, float]) -> ModelOutput:
+    def predict(
+        self,
+        features: Dict[str, float],
+        pattern_context: Optional[PatternContext] = None,
+    ) -> ModelOutput:
         rsi = features.get("rsi", 50.0)
         rsi_momentum = features.get("rsi_momentum", 0.0)
         vol_z = features.get("volatility_z", 0.0)
@@ -140,15 +231,33 @@ class Oscillator(BaseModel):
             prob_down = 0.5 + strength
             signal = "down"
 
+        direction = "UP" if prob_up >= prob_down else "DOWN"
+        strength = _apply_pattern_context_strength(
+            strength,
+            direction,
+            pattern_context,
+            feature_keys=("rsi", "rsi_momentum", "volatility_z"),
+        )
+        if direction == "UP":
+            prob_up = 0.5 + strength
+            prob_down = 0.5 - strength
+        else:
+            prob_up = 0.5 - strength
+            prob_down = 0.5 + strength
+
+        state = {
+            "signal": signal,
+            "strength": strength,
+            "momentum_factor": momentum_factor,
+        }
+        if pattern_context:
+            state["pattern"] = _pattern_state_summary(pattern_context)
+
         return ModelOutput(
             model_name=self.name,
             prob_up=prob_up,
             prob_down=prob_down,
-            state={
-                "signal": signal,
-                "strength": strength,
-                "momentum_factor": momentum_factor,
-            },
+            state=state,
             metrics={"rsi": rsi, "rsi_momentum": rsi_momentum},
         )
 
@@ -167,7 +276,11 @@ class VolumeMetrix(BaseModel):
         self.name = "VOLUMEMETRIX"
         self._config = config
 
-    def predict(self, features: Dict[str, float]) -> ModelOutput:
+    def predict(
+        self,
+        features: Dict[str, float],
+        pattern_context: Optional[PatternContext] = None,
+    ) -> ModelOutput:
         volume_z = features.get("volume_z", 0.0)
         ret = features.get("return_1", 0.0)
         volatility = features.get("volatility", 0.001)
@@ -248,11 +361,29 @@ class VolumeMetrix(BaseModel):
             prob_down = 0.5 + strength
             signal = "down"
 
+        direction_label = "UP" if prob_up >= prob_down else "DOWN"
+        strength = _apply_pattern_context_strength(
+            strength,
+            direction_label,
+            pattern_context,
+            feature_keys=("volume_z", "volatility_z", "body_ratio"),
+        )
+        if direction_label == "UP":
+            prob_up = 0.5 + strength
+            prob_down = 0.5 - strength
+        else:
+            prob_up = 0.5 - strength
+            prob_down = 0.5 + strength
+
+        state = {"signal": signal, "strength": strength, "pattern": pattern}
+        if pattern_context:
+            state["pattern"] = _pattern_state_summary(pattern_context)
+
         return ModelOutput(
             model_name=self.name,
             prob_up=prob_up,
             prob_down=prob_down,
-            state={"signal": signal, "strength": strength, "pattern": pattern},
+            state=state,
             metrics={
                 "volume_z": volume_z,
                 "return_1": ret,
