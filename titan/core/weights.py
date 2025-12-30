@@ -11,14 +11,17 @@ DEFAULT_MODEL_WEIGHTS: Dict[str, float] = {
     "TRENDVIC": 1.0,
     "OSCILLATOR": 1.0,
     "VOLUMEMETRIX": 1.0,
+    "ML_CLASSIFIER": 1.0,  # Sprint 14: LightGBM classifier
 }
 
 # Base regime weights (before performance adjustment)
+# Sprint 14: Added ML_CLASSIFIER with equal weight across regimes
+# ML model is data-driven so doesn't need regime-specific biases
 DEFAULT_REGIME_WEIGHTS: Dict[str, Dict[str, float]] = {
-    "trending_up": {"TRENDVIC": 0.50, "OSCILLATOR": 0.20, "VOLUMEMETRIX": 0.30},
-    "trending_down": {"TRENDVIC": 0.50, "OSCILLATOR": 0.20, "VOLUMEMETRIX": 0.30},
-    "ranging": {"TRENDVIC": 0.20, "OSCILLATOR": 0.50, "VOLUMEMETRIX": 0.30},
-    "volatile": {"TRENDVIC": 0.25, "OSCILLATOR": 0.25, "VOLUMEMETRIX": 0.50},
+    "trending_up": {"TRENDVIC": 0.40, "OSCILLATOR": 0.15, "VOLUMEMETRIX": 0.20, "ML_CLASSIFIER": 0.25},
+    "trending_down": {"TRENDVIC": 0.40, "OSCILLATOR": 0.15, "VOLUMEMETRIX": 0.20, "ML_CLASSIFIER": 0.25},
+    "ranging": {"TRENDVIC": 0.15, "OSCILLATOR": 0.40, "VOLUMEMETRIX": 0.20, "ML_CLASSIFIER": 0.25},
+    "volatile": {"TRENDVIC": 0.20, "OSCILLATOR": 0.20, "VOLUMEMETRIX": 0.35, "ML_CLASSIFIER": 0.25},
 }
 
 

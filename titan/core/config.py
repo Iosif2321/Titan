@@ -41,6 +41,18 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "pattern_reader.max_confidence_boost": 0.03,
     "pattern_reader.max_confidence_penalty": 0.05,
     "pattern_reader.bias_flip_threshold": 0.15,
+    # Sprint 14: ML Classifier (LightGBM)
+    "ml.enabled": True,
+    "ml.min_samples": 500,  # Minimum samples before training
+    "ml.train_interval": 1000,  # Retrain every N samples
+    "ml.n_estimators": 100,
+    "ml.max_depth": 6,
+    "ml.learning_rate": 0.05,
+    "ml.num_leaves": 31,
+    # Sprint 15: Confidence Filtering
+    "confidence_compressor.max_confidence": 0.70,  # Increased from 0.62
+    "confidence_filter.threshold": 0.55,  # Min confidence for "actionable" predictions
+    "confidence_filter.enabled": True,
     "ensemble.flat_threshold": 0.55,
     "ensemble.min_margin": 0.05,
     "ensemble.vol_z_high": 1.0,

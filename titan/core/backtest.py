@@ -13,6 +13,7 @@ from titan.core.config import ConfigStore
 from titan.core.data.loader import CsvCandleReader
 from titan.core.features.stream import FeatureStream, build_conditions
 from titan.core.models.heuristic import Oscillator, TrendVIC, VolumeMetrix
+from titan.core.models.ml import DirectionalClassifier, create_ml_classifier, HAS_LIGHTGBM
 from titan.core.ensemble import Ensemble
 from titan.core.monitor import PerformanceMonitor
 from titan.core.patterns import PatternExperience, PatternStore
@@ -134,6 +135,12 @@ class BacktestStats:
             "volatile": 0,
         }
 
+        # Sprint 15: Filtered accuracy (high-confidence predictions only)
+        self.filter_threshold = 0.55  # Will be set from config
+        self.filtered_total = 0
+        self.filtered_correct = 0
+        self.filtered_confidence_sum = 0.0
+
     def _get_confidence_bucket(self, confidence: float) -> str:
         if confidence < 0.55:
             return "0.50-0.55"
@@ -167,6 +174,13 @@ class BacktestStats:
         is_correct = pred_dir == actual_dir
         if is_correct:
             self.correct += 1
+
+        # Sprint 15: Track filtered accuracy (high-confidence only)
+        if prediction.decision.confidence >= self.filter_threshold:
+            self.filtered_total += 1
+            self.filtered_confidence_sum += prediction.decision.confidence
+            if is_correct:
+                self.filtered_correct += 1
 
         # Track regime statistics
         if regime and regime in self.regime_counts:
@@ -454,6 +468,15 @@ class BacktestStats:
                 "confident_wrong_rate": self.confident_wrong_rate(),
                 "confident_wrong_count": self.confident_wrong_count,
                 "confident_total": self.confident_total,
+            },
+            # Sprint 15: Filtered accuracy (high-confidence predictions only)
+            "filtered_accuracy": {
+                "threshold": self.filter_threshold,
+                "total": self.filtered_total,
+                "correct": self.filtered_correct,
+                "accuracy": (self.filtered_correct / self.filtered_total) if self.filtered_total > 0 else 0.0,
+                "avg_confidence": (self.filtered_confidence_sum / self.filtered_total) if self.filtered_total > 0 else 0.0,
+                "coverage": (self.filtered_total / self.total) if self.total > 0 else 0.0,
             },
             # NEW: Direction balance analysis
             "direction_balance": {
@@ -823,6 +846,19 @@ def print_summary(stats: BacktestStats, run_meta: Optional[Dict[str, object]] = 
     print(f"  MCE (Maximum Calibration Error):    {pct(mce_val):>8s}  {mce_status}")
     print(f"  Brier Score:                        {brier_val:.4f}    {brier_status}")
     print(f"  Confident Wrong Rate (conf>=70%):   {pct(cwr):>8s}  {cwr_status}  ({stats.confident_wrong_count}/{stats.confident_total})")
+
+    # Sprint 15: Filtered Accuracy
+    print("\n" + "-" * 70)
+    print("  FILTERED ACCURACY (High-Confidence Only)")
+    print("-" * 70)
+    filt_acc = (stats.filtered_correct / stats.filtered_total) if stats.filtered_total > 0 else 0.0
+    filt_conf = (stats.filtered_confidence_sum / stats.filtered_total) if stats.filtered_total > 0 else 0.0
+    coverage = (stats.filtered_total / stats.total) if stats.total > 0 else 0.0
+    filt_status = "[GREAT]" if filt_acc >= 0.65 else ("[OK]" if filt_acc >= 0.55 else "[NEEDS WORK]")
+    print(f"  Threshold:         conf >= {stats.filter_threshold:.0%}")
+    print(f"  Filtered Accuracy: {pct(filt_acc):>8s}  ({stats.filtered_correct}/{stats.filtered_total})  {filt_status}")
+    print(f"  Avg Confidence:    {pct(filt_conf):>8s}")
+    print(f"  Coverage:          {pct(coverage):>8s}  (of all predictions)")
 
     # NEW: Direction Balance Analysis
     print("\n" + "-" * 70)
@@ -1294,6 +1330,17 @@ def run_backtest(
         VolumeMetrix(config_store),
     ]
 
+    # Sprint 14: Create ML classifier for directional prediction
+    ml_classifier = create_ml_classifier()
+    ml_enabled = ml_classifier is not None and HAS_LIGHTGBM
+    ml_train_interval = int(config_store.get("ml.train_interval", 1000))  # Retrain every N samples
+    ml_min_samples = int(config_store.get("ml.min_samples", 500))  # Min samples to start training
+    ml_last_train_count = 0
+    if verbose and ml_enabled:
+        print(f"[Backtest] ML Classifier enabled (LightGBM)")
+    elif verbose:
+        print(f"[Backtest] ML Classifier disabled (LightGBM not available)")
+
     feature_stream = FeatureStream(config_store)
     ensemble = Ensemble(
         config_store,
@@ -1310,8 +1357,14 @@ def run_backtest(
             interval_minutes = int(run_meta["interval"])
         except (ValueError, TypeError):
             interval_minutes = 1
-    stats = BacktestStats([model.name for model in models], interval_minutes=interval_minutes)
-    feature_analyzer = FeatureAnalyzer([model.name for model in models])
+    # Build model names list including ML classifier if enabled
+    model_names = [model.name for model in models]
+    if ml_enabled:
+        model_names.append("ML_CLASSIFIER")
+    stats = BacktestStats(model_names, interval_minutes=interval_minutes)
+    # Sprint 15: Set filter threshold from config
+    stats.filter_threshold = float(config_store.get("confidence_filter.threshold", 0.55))
+    feature_analyzer = FeatureAnalyzer(model_names)
     prediction_analyzer = PredictionAnalyzer()  # NEW: Advanced analysis
     details_path = os.path.join(out_dir, "predictions.jsonl")
     detail_writer = DetailWriter(details_path)
@@ -1433,6 +1486,18 @@ def run_backtest(
                 feature_analyzer.update(pending.features, outcome.actual_direction, model_decisions)
                 detail_writer.write(pending, outcome, model_decisions)
 
+                # Sprint 14: Add training sample to ML classifier
+                if ml_enabled and ml_classifier is not None:
+                    ml_classifier.add_training_sample(pending.features, outcome.actual_direction)
+                    # Periodically retrain the model
+                    samples_since_train = ml_classifier.training_samples - ml_last_train_count
+                    if (ml_classifier.training_samples >= ml_min_samples and
+                            samples_since_train >= ml_train_interval):
+                        if ml_classifier.train():
+                            ml_last_train_count = ml_classifier.training_samples
+                            if verbose and ml_classifier.training_samples == ml_min_samples + samples_since_train:
+                                print(f"\n[Backtest] ML Classifier trained on {ml_classifier.training_samples} samples")
+
                 # NEW: Add to prediction analyzer for advanced analysis
                 pred_detail = PredictionDetail(
                     ts=pending.ts,
@@ -1474,6 +1539,11 @@ def run_backtest(
             model.predict(features, pattern_context=pattern_contexts.get(model.name))
             for model in models
         ]
+
+        # Sprint 14: Add ML classifier output if trained
+        if ml_enabled and ml_classifier is not None and ml_classifier.is_trained:
+            ml_output = ml_classifier.predict(features)
+            outputs.append(ml_output)
         if pattern_id > 0 and model_adjuster_enabled:
             outputs = [
                 pattern_model_adjuster.adjust_model_output(
@@ -1525,6 +1595,17 @@ def run_backtest(
         summary["run_meta"].update(run_meta)
     summary["weights"] = weight_manager.get_model_weights()
     summary["performance_monitor"] = performance_monitor.get_statistics()
+
+    # Sprint 14: Add ML classifier info
+    if ml_enabled and ml_classifier is not None:
+        summary["ml_classifier"] = {
+            "enabled": True,
+            "is_trained": ml_classifier.is_trained,
+            "training_samples": ml_classifier.training_samples,
+            "feature_importance": ml_classifier.get_feature_importance() if ml_classifier.is_trained else {},
+        }
+    else:
+        summary["ml_classifier"] = {"enabled": False}
 
     # NEW: Add advanced analysis
     summary["advanced_analysis"] = prediction_analyzer.full_summary()

@@ -91,6 +91,14 @@ class FeatureStream:
         self._price_history: deque = deque(maxlen=5)  # For price momentum
         self._volume_history: deque = deque(maxlen=10)  # For volume trend
 
+        # Sprint 14: Extended features for ML
+        self._return_history: deque = deque(maxlen=10)  # For lagged returns
+        self._high_history: deque = deque(maxlen=20)  # For ATR
+        self._low_history: deque = deque(maxlen=20)  # For ATR
+        self._atr_history: deque = deque(maxlen=20)  # ATR rolling
+        self._ema_10: Optional[float] = None  # EMA(10)
+        self._ema_20: Optional[float] = None  # EMA(20)
+
     def update(self, candle: Candle) -> Optional[Dict[str, float]]:
         if self._prev_close is None:
             self._prev_close = candle.close
@@ -99,6 +107,11 @@ class FeatureStream:
             self._volume.append(candle.volume)
             self._price_history.append(candle.close)
             self._volume_history.append(candle.volume)
+            # Sprint 14: Initialize extended tracking
+            self._high_history.append(candle.high)
+            self._low_history.append(candle.low)
+            self._ema_10 = candle.close
+            self._ema_20 = candle.close
             return None
 
         ret = (candle.close / self._prev_close) - 1.0
@@ -113,6 +126,23 @@ class FeatureStream:
         # Sprint 10: Track history for new features
         self._price_history.append(candle.close)
         self._volume_history.append(candle.volume)
+
+        # Sprint 14: Track extended history
+        self._return_history.append(ret)
+        self._high_history.append(candle.high)
+        self._low_history.append(candle.low)
+
+        # Sprint 14: Update EMAs
+        alpha_10 = 2.0 / (10 + 1)
+        alpha_20 = 2.0 / (20 + 1)
+        if self._ema_10 is not None:
+            self._ema_10 = alpha_10 * candle.close + (1 - alpha_10) * self._ema_10
+        else:
+            self._ema_10 = candle.close
+        if self._ema_20 is not None:
+            self._ema_20 = alpha_20 * candle.close + (1 - alpha_20) * self._ema_20
+        else:
+            self._ema_20 = candle.close
 
         gain = max(ret, 0.0)
         loss = max(-ret, 0.0)
@@ -201,6 +231,68 @@ class FeatureStream:
         # 5. Candle direction (1 = bullish, -1 = bearish)
         candle_direction = 1.0 if candle.close >= candle.open else -1.0
 
+        # Sprint 14: Scale-invariant features for ML
+        # 6. Lagged returns (return_lag_1 through return_lag_5)
+        return_lags = [0.0] * 5
+        for i in range(min(5, len(self._return_history))):
+            if i < len(self._return_history):
+                return_lags[i] = self._return_history[-(i + 1)]
+
+        # 7. ATR as percentage of price
+        atr_pct = 0.0
+        if len(self._high_history) >= 14:
+            tr_sum = 0.0
+            for i in range(14):
+                hi = self._high_history[-(i + 1)]
+                lo = self._low_history[-(i + 1)]
+                tr_sum += hi - lo
+            atr = tr_sum / 14
+            atr_pct = atr / candle.close if candle.close > 0 else 0.0
+
+        # 8. High-Low range as percentage of close
+        high_low_range_pct = total_range / candle.close if candle.close > 0 else 0.0
+
+        # 9. MA delta as percentage of price (scale-invariant)
+        ma_delta_pct = (ma_delta or 0.0) / candle.close if candle.close > 0 else 0.0
+
+        # 10. EMA spreads as percentage
+        ema_10_spread_pct = 0.0
+        ema_20_spread_pct = 0.0
+        if self._ema_10 is not None and candle.close > 0:
+            ema_10_spread_pct = (candle.close - self._ema_10) / candle.close
+        if self._ema_20 is not None and candle.close > 0:
+            ema_20_spread_pct = (candle.close - self._ema_20) / candle.close
+
+        # 11. Multi-period returns (5 and 10 periods)
+        return_5 = 0.0
+        return_10 = 0.0
+        if len(self._price_history) >= 5:
+            old_price_5 = self._price_history[0]  # oldest in 5-period history
+            if old_price_5 > 0:
+                return_5 = (candle.close - old_price_5) / old_price_5
+        if len(self._return_history) >= 10:
+            return_10 = sum(self._return_history)  # cumulative return
+
+        # 12. RSI zones (oversold/overbought indicators)
+        rsi_oversold = 1.0 if rsi_val < 30 else 0.0
+        rsi_overbought = 1.0 if rsi_val > 70 else 0.0
+        rsi_neutral = 1.0 if 40 <= rsi_val <= 60 else 0.0
+
+        # 13. Volume change percentage
+        volume_change_pct = 0.0
+        if len(self._volume_history) >= 2:
+            prev_vol = self._volume_history[-2]
+            if prev_vol > 0:
+                volume_change_pct = (candle.volume - prev_vol) / prev_vol
+
+        # 14. Body size as percentage of close
+        body_pct = body / candle.close if candle.close > 0 else 0.0
+
+        # 15. Volatility ratio (current vol vs average)
+        vol_ratio = 0.0
+        if vol_mean and vol_mean > 0:
+            vol_ratio = (volatility or 0.0) / vol_mean
+
         return {
             "close": candle.close,
             "open": candle.open,
@@ -225,6 +317,25 @@ class FeatureStream:
             "upper_wick_ratio": upper_wick_ratio,
             "lower_wick_ratio": lower_wick_ratio,
             "candle_direction": candle_direction,
+            # Sprint 14: Scale-invariant ML features (17 new)
+            "return_lag_1": return_lags[0],
+            "return_lag_2": return_lags[1],
+            "return_lag_3": return_lags[2],
+            "return_lag_4": return_lags[3],
+            "return_lag_5": return_lags[4],
+            "atr_pct": atr_pct,
+            "high_low_range_pct": high_low_range_pct,
+            "ma_delta_pct": ma_delta_pct,
+            "ema_10_spread_pct": ema_10_spread_pct,
+            "ema_20_spread_pct": ema_20_spread_pct,
+            "return_5": return_5,
+            "return_10": return_10,
+            "rsi_oversold": rsi_oversold,
+            "rsi_overbought": rsi_overbought,
+            "rsi_neutral": rsi_neutral,
+            "volume_change_pct": volume_change_pct,
+            "body_pct": body_pct,
+            "vol_ratio": vol_ratio,
         }
 
 

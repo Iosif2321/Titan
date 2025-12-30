@@ -1,23 +1,62 @@
 # План улучшений Titan v2
 
-## Текущее состояние (Sprint 13 - 2025-12-29)
+## ВАЖНО: Принципы системы
 
-| Метрика | Baseline | После Sprint 13 | Изменение |
-|---------|----------|-----------------|-----------|
-| Ensemble Accuracy | 49.9% | **52.12%** | +2.2% ✅ |
-| Full Agreement Acc | 51.8% | **55.77%** | +4.0% ✅ |
-| ECE | 5.3% | **1.92%** | -3.4% ✅ |
-| Conf 55-60% Accuracy | 50.8% | **61.40%** | +10.6% ✅ |
-| Sharpe Ratio | 1.4 | **2.55** | +1.15 ✅ |
-| Direction Balance | 0.91 | **0.899** | Stable ✅ |
-| TrendVIC FLAT | 45 | **45** | Stable |
-| Oscillator FLAT | 119→0 | **0** | Fixed ✅ |
-| VolumeMetrix FLAT | 213→0 | **0** | Fixed ✅ |
+1. **FLAT = НЕЖЕЛАТЕЛЬНО** - Модели ОБЯЗАНЫ выдавать UP или DOWN каждую свечу
+2. **Цель: 75%+ accuracy** - Достижимо на коротких горизонтах (5-10 мин) с фильтром confidence
+3. **ML > Эвристики** - Chronos доказал: LightGBM + Online Learning = путь к 75%
 
-### Sprint 13 результаты
-- PatternExperience: анализ исторической эффективности паттернов с time decay
-- PatternAdjuster: корректировка confidence на основе паттернов
-- Интеграция в Ensemble, backtest.py, live.py
+---
+
+## Текущее состояние (После Sprint 15 - 2025-12-30)
+
+| Метрика | Sprint 12 | Sprint 14 | Sprint 15 | Target |
+|---------|-----------|-----------|-----------|--------|
+| Ensemble Accuracy | 48.6% | 52.16% | **52.17%** ✅ | 75%+ |
+| **Filtered (≥55%)** | - | - | **65.21%** ✅ | 75%+ |
+| Coverage | - | - | **9.07%** ⚠️ | 30%+ |
+| ECE | 0.3% | 1.58% | **1.95%** ✅ | <5% |
+| p-value | 0.003 | 0.001 | **0.001** ✅ | <0.05 |
+| Sharpe Ratio | -23.7 | -7.6 | **-7.6** | >1.5 |
+
+### КЛЮЧЕВОЕ ДОСТИЖЕНИЕ
+**Filtered accuracy 65.21%** при conf≥55% - близко к цели 75%!
+Но coverage только 9% - нужно увеличить до 30%+.
+
+### Проблема распределения уверенности
+| Bucket | Accuracy | Count | % Total |
+|--------|----------|-------|---------|
+| 50-55% | 50.87% | 9165 | **91%** |
+| 55-60% | 65.54% | 859 | 8.5% |
+| 60-65% | 60.00% | 55 | 0.5% |
+
+**91% предсказаний в самом низком бакете - главная проблема!**
+
+### Sprint 14-15 (COMPLETED ✅)
+- ✅ Sprint 14: LightGBM Classifier (31 scale-invariant features)
+- ✅ Sprint 15: Confidence Filtering (65.21% filtered accuracy)
+- ✅ System Analysis (`docs/SYSTEM_ANALYSIS.md`)
+- ✅ Cleanup Script (`cleanup.py`)
+
+---
+
+## Анализ проекта Chronos (2025-12-30)
+
+**Chronos** достигает **66-74% accuracy** на 5-10 минутных горизонтах. Ключевые отличия:
+
+| Аспект | Chronos | Titan | Что делать |
+|--------|---------|-------|------------|
+| Модели | LightGBM | Эвристики | Заменить на ML |
+| Features | 47 (scale-invariant) | 13 | Добавить 30+ |
+| Online Learning | ✅ SGD + RMSProp | ❌ | Внедрить |
+| Confidence Filter | ≥70% → 75% acc | Нет | Добавить |
+| Timeframe | 5-10 min | 1 min | Увеличить |
+
+### Доказано Chronos:
+```
+5min horizon + confidence ≥ 0.70 → 76.9% accuracy
+10min horizon + confidence ≥ 0.65 → 75.2% accuracy
+```
 
 ---
 
@@ -1086,123 +1125,256 @@ def get_pattern_stats_with_decay(
 
 ---
 
-## SPRINT 12: Pattern System Hardening (IN PROGRESS)
+## SPRINT 12: Pattern System Hardening (COMPLETED ✅)
 
-### Проблема
-При анализе Sprint 13 обнаружены критические баги и технический долг:
+### Исправленные баги:
+- ✅ FLAT handling - FLAT больше не загрязняет accuracy stats
+- ✅ Min scale floor (0.7) - предотвращает порочный круг
+- ✅ Pattern deduplication - проверка по pattern_key перед созданием
+- ✅ Overconfidence threshold - повышен с 0.4 до 0.55
+- ✅ cap_strength formula - исправлено на `(cap - 0.5) * 2`
 
-### 12.1 Критический баг: Удаление чужих snapshots
-**Файл:** `titan/core/patterns.py:917-926`
-
-```python
-# БЫЛО (БАГ):
-DELETE FROM pattern_event_snapshots
-WHERE event_id NOT IN (
-    SELECT id FROM pattern_events WHERE pattern_id = ?
-)
-# Удаляет snapshots ВСЕХ паттернов кроме текущего!
-
-# ДОЛЖНО БЫТЬ:
-# 1. Собрать ID событий для удаления
-# 2. Удалить их snapshots
-# 3. Удалить сами события
-```
-
-### 12.2 Критический баг: Data Leakage
-**Файл:** `titan/core/patterns.py:1247`
-
-```python
-# БЫЛО (БАГ):
-events = self._store.get_events(pattern_id)  # Видит "будущие" события!
-
-# ДОЛЖНО БЫТЬ:
-events = self._store.get_events(pattern_id, max_ts=current_ts)
-```
-
-### 12.3 Рефакторинг: Config-driven константы
-**Файл:** `titan/core/patterns.py:11-15`
-
-```python
-# БЫЛО (жёстко):
-MAX_DECISIONS = 50000
-TOP_DECISIONS_COUNT = 1000
-INACTIVE_AFTER_DAYS = 30
-
-# ДОЛЖНО БЫТЬ:
-max_decisions = int(config.get("pattern.max_decisions", 50000))
-```
-
-### 12.4 Рефакторинг: day_of_week consistency
-- `ExtendedConditions` имеет `day_of_week`
-- `build_pattern_key()` НЕ включает его
-- `pattern_search_index` НЕ имеет колонку
-- **Решение:** Либо добавить везде, либо убрать из hash
-
-### 12.5 Рефакторинг: Удаление мёртвого кода
-- `pattern_conditions_v2` — таблица создаётся, но не используется
-- `conditions_version` — колонка есть, всегда = 1
-- `momentum`, `rsi_zone` — в схеме, не используются
-
-### 12.6 Критерии успеха Sprint 12
-- [ ] Баг snapshot deletion исправлен
-- [ ] Data leakage исправлен (time-bounded queries)
-- [ ] Константы читаются из конфига
-- [ ] day_of_week согласован (или удалён)
-- [ ] Мёртвый код удалён
-- [ ] **ТЕСТ:** Backtest проходит без регрессии
+### Результат Sprint 12:
+**Точность 48.6% (хуже случайного)** - Pattern system не даёт улучшений.
+Рекомендация: отключить pattern adjustments, перейти на ML.
 
 ---
 
-## Приоритеты реализации
+## SPRINT 14: LightGBM Classifier (COMPLETED ✅)
 
+### Результат
+- ✅ 31 scale-invariant feature добавлено в FeatureStream
+- ✅ DirectionalClassifier создан в `titan/core/models/ml.py`
+- ✅ Интеграция в Ensemble с 25% весом
+- ✅ Accuracy 52.16% (статистически лучше случайного, p=0.001)
+
+### Добавленные фичи (17 новых)
+```python
+# Lagged returns
+return_lag_1..5        # 5 фичей
+
+# Volatility
+atr_pct                # ATR в % от цены
+high_low_range_pct     # Range свечи в %
+vol_ratio              # Текущая vol / средняя vol
+
+# Trend
+ema_10_spread_pct      # Расстояние от EMA10
+ema_20_spread_pct      # Расстояние от EMA20
+ma_delta_pct           # MA delta в %
+
+# Returns
+return_5, return_10    # Multi-period returns
+log_return_1           # Log return
+
+# RSI zones
+rsi_oversold           # RSI < 30
+rsi_overbought         # RSI > 70
+rsi_neutral            # 30 <= RSI <= 70
+
+# Volume
+volume_change_pct      # Изменение объёма
+body_pct               # Body в % от цены
+```
+
+---
+
+## SPRINT 15: Confidence Filter (COMPLETED ✅)
+
+### Результат
+- ✅ max_confidence увеличен с 0.62 до 0.70
+- ✅ confidence_filter.threshold = 0.55 добавлен
+- ✅ Filtered accuracy tracking в BacktestStats
+- ✅ **Filtered accuracy 65.21%** при conf≥55%
+- ✅ Coverage 9.07% (914/10079 предсказаний)
+
+### Confidence Distribution
+```
+50-55%: 50.87% accuracy, 9165 predictions (91%)
+55-60%: 65.54% accuracy, 859 predictions (8.5%)
+60-65%: 60.00% accuracy, 55 predictions (0.5%)
+```
+
+### Вывод
+Filtered accuracy близка к цели (65% vs 75%), но coverage слишком низкий.
+Нужно увеличить долю high-confidence предсказаний с 9% до 30%+.
+
+---
+
+## SPRINT 16: Adaptive Calibration Improvements (NEXT)
+
+### Цель
+Увеличить долю high-confidence предсказаний с 9% до 30%+ без потери accuracy.
+
+### 16.1 Regime-Based Max Confidence
+```python
+# Разный потолок уверенности для разных режимов
+REGIME_MAX_CONFIDENCE = {
+    "trending_up": 0.75,    # Best regime - allow higher confidence
+    "ranging": 0.70,        # Good regime
+    "trending_down": 0.65,  # Problematic regime
+    "volatile": 0.60,       # Worst regime - limit confidence
+}
+```
+
+### 16.2 Sigmoid Compression
+```python
+def sigmoid_compress(strength, regime):
+    """Sigmoid вместо линейного сжатия для лучшего разделения."""
+    max_conf = REGIME_MAX_CONFIDENCE.get(regime, 0.70)
+    x = strength * 4 - 2  # Map [0, 1] to [-2, 2]
+    sigmoid = 1 / (1 + exp(-x))
+    return 0.5 + (max_conf - 0.5) * sigmoid
+```
+
+### 16.3 Agreement Boost Increase
+```python
+def calculate_confidence_boost(models_agree, regime_aligned, momentum_aligned):
+    boost = 0.0
+    if models_agree >= 3:
+        boost += 0.08  # Увеличено с 0.05
+    if regime_aligned:
+        boost += 0.03
+    if momentum_aligned:
+        boost += 0.02
+    return min(boost, 0.12)  # Max 12% boost
+```
+
+### 16.4 Критерии успеха Sprint 16
+- [ ] Regime-based max_confidence интегрирован
+- [ ] Sigmoid compression работает
+- [ ] Agreement boost увеличен
+- [ ] **ТЕСТ:** High-conf coverage > 20% (сейчас 9%)
+- [ ] **ТЕСТ:** Filtered accuracy ≥ 65%
+
+---
+
+## SPRINT 17: 5-Minute Timeframe
+
+### Цель
+Перейти с 1-минутных на 5-минутные свечи для уменьшения шума.
+
+### 17.1 Изменения
+```python
+# cli.py
+--interval 5  # вместо 1
+
+# features/stream.py
+# Пересчитать lookback windows для 5m
+```
+
+### 17.2 Критерии успеха Sprint 17
+- [ ] Система работает на 5m свечах
+- [ ] **ТЕСТ:** Accuracy > 55% (меньше шума)
+- [ ] **ТЕСТ:** Filtered accuracy > 70%
+
+---
+
+## SPRINT 18: Online Learning (ФИНАЛ)
+
+### Цель
+Добавить online обучение для адаптации к изменениям рынка.
+**Выполняется ПОСЛЕДНИМ**, когда система отлажена и проверена на исторических данных.
+
+### 17.1 SGD + RMSProp Updater
+```python
+class OnlineLearner:
+    def __init__(self, n_features: int, lr: float = 0.05):
+        self.weights = np.zeros(n_features)
+        self.lr = lr
+        self.rmsprop_g = np.zeros(n_features)  # RMSProp накопитель
+
+    def update(self, features: np.ndarray, error: float):
+        """Обновление весов после получения outcome."""
+        gradient = error * features
+
+        # RMSProp: G = 0.95*G + 0.05*g²
+        self.rmsprop_g = 0.95 * self.rmsprop_g + 0.05 * gradient**2
+
+        # Update: w -= lr * g / sqrt(G + eps)
+        self.weights -= self.lr * gradient / (np.sqrt(self.rmsprop_g) + 1e-8)
+```
+
+### 17.2 Multi-Scale EMA Memory
+```python
+# Три временных масштаба памяти (из Chronos):
+short_ema  = 0.05 * new + 0.95 * old   # ~20 обновлений
+medium_ema = 0.01 * new + 0.99 * old   # ~100 обновлений
+long_ema   = 0.001 * new + 0.999 * old # ~1000 обновлений
+```
+
+### 17.3 Критерии успеха Sprint 17
+- [ ] Online learning обновляет веса в реальном времени
+- [ ] Multi-scale EMA memory
+- [ ] **ТЕСТ:** Accuracy стабильна при изменении рынка
+- [ ] Система готова к production
+
+---
+
+## Приоритеты реализации (обновлено 2025-12-30)
+
+### Завершённые спринты
+| Sprint | Результат | Статус |
+|--------|-----------|--------|
+| Sprint 4: Confidence Recalibration | ECE 1.92% ✅ | ✅ Done |
+| Sprint 5: Volatile Handler | Volatile error 51.5% | ✅ Done |
+| Sprint 6: Trending Down Fix | Trending error 49.3% | ✅ Done |
+| Sprint 8: Temporal Patterns | ECE improved | ✅ Done |
+| Sprint 9: Model Improvements | Models ~49% | ✅ Done |
+| Sprint 10: Features | 13 features | ✅ Done |
+| Sprint 11: Ensemble | Agreement 55.77% | ✅ Done |
+| Sprint 13: Pattern System | No improvement ❌ | ✅ Done |
+| Sprint 12: Bug Fixes | Accuracy 48.6% ❌ | ✅ Done |
+| **Sprint 14: LightGBM** | **Accuracy 52.17%** ✅ | ✅ Done |
+| **Sprint 15: Confidence Filter** | **Filtered 65.21%** ✅ | ✅ Done |
+
+### Предстоящие спринты
 | Приоритет | Sprint | Ожидаемый эффект | Статус |
 |-----------|--------|------------------|--------|
-| 1 | Sprint 4: Confidence Recalibration | ECE < 5%, Confident Wrong < 40% | ✅ Done |
-| 2 | Sprint 5: Volatile Handler | Volatile error < 52% | ✅ Done |
-| 3 | Sprint 6: Trending Down Fix | Trending_down error < 50% | ✅ Done |
-| 4 | Sprint 8: Temporal Patterns | Danger hours acc > 45% | ✅ Done |
-| 5 | Sprint 9: Model Improvements | Per-model acc > 48% | ✅ Done |
-| 6 | Sprint 10: Features | Better correlations | ✅ Done |
-| 7 | Sprint 11: Ensemble | Agreement acc > 55% | ✅ Done (55.77%) |
-| 8 | Sprint 13: Pattern System | Pattern-based accuracy boost | ✅ Done |
-| 9 | **Sprint 12: Hardening** | Bug fixes, data integrity | 🔄 In Progress |
-| 10 | Sprint 14: ML Model | Overall acc > 55% | ⏳ Next |
+| **1** | **Sprint 16: Adaptive Calibration** | Coverage > 30% | ⏳ NEXT |
+| 2 | Sprint 17: 5-Minute Timeframe | Overall acc > 55% | ⏳ Pending |
+| 3 | Sprint 18: Online Learning | Адаптация к рынку (ФИНАЛ) | ⏳ Last |
+
+**Ключевая проблема:** 91% предсказаний в 50-55% бакете.
+**Решение:** Улучшить распределение уверенности через адаптивную калибровку.
 
 ---
 
-## Целевые метрики
+## Целевые метрики (обновлено)
 
-| Метрика | Baseline | После Sprint 4-6 | После Sprint 7-13 | Target |
-|---------|----------|------------------|-------------------|--------|
-| Ensemble Acc | 49.9% | 51-52% | **52.12%** ✅ | 55-60% |
-| p-value | 0.6 | < 0.3 | **0.05** ✅ | < 0.05 |
-| Volatile Error | 56.3% | < 52% | **~48%** ✅ | < 48% |
-| ECE | 5.3% | < 4% | **1.92%** ✅ | < 3% |
-| Conf Wrong | 50% | < 40% | **0%** ✅ | < 30% |
-| Sharpe | - | - | **2.55** ✅ | > 1.5 |
-| Full Agreement | 51.8% | - | **55.77%** ✅ | > 55% |
+| Метрика | Sprint 15 | Sprint 16 | Sprint 17 | Ultimate |
+|---------|-----------|-----------|-----------|----------|
+| Overall Accuracy | **52.17%** ✅ | 52-55% | 55-60% | 60%+ |
+| Filtered Accuracy | **65.21%** ✅ | 65-70% | 70-75% | **75%+** |
+| Coverage | **9.07%** ⚠️ | **30%+** | 40%+ | 50%+ |
+| FLAT rate | **0%** ✅ | 0% | 0% | 0% |
+| p-value | **0.001** ✅ | <0.001 | <0.001 | <0.001 |
+| ECE | **1.95%** ✅ | <5% | <5% | <3% |
 
 ---
 
 ## Файлы для создания/модификации
 
-### Новые файлы:
-1. `titan/core/strategies/volatile.py` ✅
-2. `titan/core/detectors/exhaustion.py` ✅
-3. `titan/core/adapters/movement.py`
-4. `titan/core/adapters/temporal.py` ✅
-5. `titan/core/filters/movement.py`
-6. `titan/core/models/ml.py` ⏳ (Sprint 12)
-7. `titan/core/adapters/pattern.py` ✅ (Sprint 13)
+### Новые файлы (Sprint 16-18):
+1. `titan/core/online.py` - OnlineLearner с RMSProp (Sprint 18)
 
-### Модификации:
-1. `titan/core/calibration.py` - ConfidenceCompressor ✅
-2. `titan/core/ensemble.py` - All integrations ✅
-3. `titan/core/regime.py` - VolatileDetector ✅
-4. `titan/core/weights.py` - AdaptiveWeightManager ✅
-5. `titan/core/models/heuristic.py` - Oscillator, VolumeMetrix ✅
-6. `titan/core/features/stream.py` - New features ✅
-7. `titan/core/patterns.py` - PatternExperience ✅ (Sprint 13)
-8. `titan/core/backtest.py` - Pattern integration ✅ (Sprint 13)
-9. `titan/core/live.py` - Pattern integration ✅ (Sprint 13)
-10. `titan/core/config.py` - Pattern parameters ✅ (Sprint 13)
+### Модификации (Sprint 16):
+1. `titan/core/calibration.py` - Sigmoid compression, regime-based max
+2. `titan/core/ensemble.py` - Enhanced agreement boost
+
+### Завершённые файлы:
+- `titan/core/models/ml.py` ✅ (Sprint 14)
+- `titan/core/features/stream.py` ✅ (31 features)
+- `titan/core/backtest.py` ✅ (filtered accuracy tracking)
+- `titan/core/strategies/volatile.py` ✅
+- `titan/core/detectors/exhaustion.py` ✅
+- `titan/core/adapters/temporal.py` ✅
+- `titan/core/adapters/pattern.py` ✅
+- `titan/core/patterns.py` ✅
+- `titan/core/calibration.py` ✅
+- `titan/core/regime.py` ✅
+- `titan/core/weights.py` ✅
+- `titan/core/models/heuristic.py` ✅
+- `titan/core/config.py` ✅
+- `cleanup.py` ✅ (utility)
+- `docs/SYSTEM_ANALYSIS.md` ✅

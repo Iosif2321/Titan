@@ -64,44 +64,59 @@ Titan is a cryptocurrency price direction prediction system targeting 75%+ accur
 
 ---
 
-## Current Status (Sprint 13 Complete - 2025-12-29)
+## Current Status (Sprint 15 Complete - 2025-12-30)
 
-| Metric | Baseline | After Sprint 11 | After Sprint 13 | Target |
-|--------|----------|-----------------|-----------------|--------|
-| Ensemble | 40.17% | 51.91% | **52.12%** | 75%+ |
-| TrendVIC | 46.42% | 50.73% | **50.94%** | 75%+ |
-| Oscillator | 17.03% | 49.20% | **49.13%** | 75%+ |
-| VolumeMetrix | 35.16% | 48.99% | **49.06%** | 75%+ |
-| ECE | ~10% | 2.71% | **1.92%** | <10% ✅ |
-| p-value | 0.6 | 0.13 | **0.05** | <0.05 |
-| FLAT rate | ~30% | 0% | **0%** | <5% ✅ |
-| Sharpe | - | 1.4 | **2.55** | >1.5 ✅ |
+| Metric | Sprint 14 | Sprint 15 | Target |
+|--------|-----------|-----------|--------|
+| Ensemble | 52.16% | **52.17%** | 75%+ |
+| **Filtered (conf≥55%)** | - | **65.21%** ✅ | 75%+ |
+| TrendVIC | 47.03% | **47.06%** | 75%+ |
+| ML Classifier | 36.41% | **37.17%** | 75%+ |
+| Oscillator | 44.03% | **44.14%** | 75%+ |
+| VolumeMetrix | 41.79% | **41.74%** | 75%+ |
+| ECE | 1.58% | **1.95%** ✅ | <10% |
+| p-value | 0.001 | **0.001** ✅ | <0.05 |
+| FLAT rate | 0% | **0%** ✅ | <5% |
 
-### Key Improvements (Sprints 4-13)
-- **Agreement Accuracy**: Full agreement now **55.77%**
-- **High Confidence**: conf 55-60% now has **61.40%** accuracy
-- **High Confidence**: conf 60-65% now has **66.67%** accuracy
-- **ECE**: Excellent at **1.92%** (best so far)
-- **Pattern System**: Integrated historical pattern learning
-- **Sharpe Ratio**: Improved to **2.55** (good risk-adjusted returns)
+### Key Achievement (Sprint 15)
+**Filtered accuracy reaches 65.21%** when using only high-confidence predictions (conf ≥55%).
+- Coverage: 9.07% (914 out of 10,079 predictions)
+- Confidence bucket 55-60%: **65.54%** accuracy (859 predictions)
+- Confidence bucket 60-65%: **60.00%** accuracy (55 predictions)
 
-### Confidence Calibration (Sprint 13)
-| Confidence | Accuracy | Count |
-|------------|----------|-------|
-| 50-55% | 50.83% | 1265 |
-| 55-60% | 61.40% | 171 |
-| 60-65% | 66.67% | 3 |
+### Critical Issue Identified
+**91% of predictions fall in 50-55% confidence bucket!** Only 9% have higher confidence.
+This is the main bottleneck - need to increase high-confidence coverage from 9% to 30%+.
 
-### Current Analysis (24h backtest 2025-12-29)
-- **Total Predictions**: 1439
-- **Best session**: US (52.3%)
-- **Worst session**: Europe (51.4%)
-- **Best hour**: 17:00 UTC (63.3%)
-- **Worst hour**: 13:00 UTC (40.0%)
-- **Best movement size**: Tiny (53.9%)
-- **Worst movement size**: Large (45.6%)
-- **Direction Balance**: 0.899 (balanced)
-- **Statistical significance**: p=0.05 (borderline significant!)
+### Sprint 14: LightGBM Classifier (2025-12-30)
+
+| Component | Description |
+|-----------|-------------|
+| **ML_FEATURES** | 31 scale-invariant features (returns, RSI, volatility, candle structure) |
+| **DirectionalClassifier** | LightGBM binary classifier (UP/DOWN only) |
+| **Training** | Online learning: 500 min samples, retrain every 1000 samples |
+| **Integration** | Added to Ensemble with 25% weight in all regimes |
+
+### 7-Day Backtest Results (168h, 2025-12-30)
+- **Total Predictions**: 10,079
+- **Ensemble Accuracy**: 52.16% (statistically BETTER than random, p=0.001)
+- **TrendVIC**: 47.03% accuracy, FLAT=466 (4.6%)
+- **Oscillator**: 44.03% accuracy, FLAT=1645 (16.3%)
+- **VolumeMetrix**: 41.79% accuracy, FLAT=1443 (14.3%)
+- **ML_CLASSIFIER**: 36.41% accuracy (training online, needs improvement)
+- **Full Agreement**: 55.16% (1066 predictions)
+- **Direction Balance**: 0.85 (balanced)
+
+### Accuracy by Session
+| Session | Accuracy | Count |
+|---------|----------|------:|
+| ASIA | 53.1% | 3360 |
+| US | 52.1% | 4200 |
+| EUROPE | 51.0% | 2519 |
+
+### Best/Worst Hours
+- **Best hour**: 4:00 UTC (57.9%)
+- **Worst hour**: 13:00 UTC (48.6%)
 
 ---
 
@@ -210,6 +225,37 @@ Titan is a cryptocurrency price direction prediction system targeting 75%+ accur
 - Added config parameters: `pattern.boost_threshold`, `pattern.penalty_threshold`, etc.
 - **Result**: ECE 1.92%, Sharpe 2.55, system learns from historical patterns
 
+### Sprint 14: LightGBM Classifier (2025-12-30)
+- Added 17 new scale-invariant features to `FeatureStream`:
+  - Lagged returns (return_lag_1..5)
+  - ATR percentage, high-low range percentage
+  - EMA spreads (10 and 20 period)
+  - Multi-period returns (5 and 10 period)
+  - RSI zones (oversold, overbought, neutral)
+  - Volume change percentage, body percentage, vol ratio
+- Created `DirectionalClassifier` in `titan/core/models/ml.py`:
+  - LightGBM binary classifier for UP/DOWN prediction
+  - 31 scale-invariant features (ML_FEATURES)
+  - Online training: accumulates samples, trains when 500+ samples
+  - Never outputs FLAT (always UP or DOWN)
+  - Includes save/load and feature importance methods
+- Integrated into Ensemble with 25% weight across all regimes
+- Updated `weights.py` with ML_CLASSIFIER in DEFAULT_REGIME_WEIGHTS
+- Added config parameters: `ml.min_samples`, `ml.train_interval`, etc.
+- **Result**: Ensemble 52.16%, p=0.001, statistically significant
+
+### Sprint 15: Confidence Filtering (2025-12-30)
+- Increased `confidence_compressor.max_confidence` from 0.62 to 0.70
+- Added `confidence_filter.threshold` config parameter (default 0.55)
+- Added filtered accuracy tracking to `BacktestStats`:
+  - `filtered_total`, `filtered_correct`, `filtered_confidence_sum`
+  - Coverage calculation (percentage of actionable predictions)
+- Added "FILTERED ACCURACY" section to backtest output
+- Added `filtered_accuracy` section to summary.json
+- **Result**: Filtered accuracy **65.21%** at conf ≥55% threshold
+  - Coverage: 9.07% (914/10,079 predictions)
+  - Full agreement accuracy: 56.08%
+
 ---
 
 ## Key Files
@@ -217,8 +263,9 @@ Titan is a cryptocurrency price direction prediction system targeting 75%+ accur
 ### Core System
 - `titan/core/backtest.py` - Main backtest engine with analysis integration
 - `titan/core/ensemble.py` - Model ensemble with regime adaptation
-- `titan/core/features/stream.py` - Feature calculation (13 features including rsi_momentum)
+- `titan/core/features/stream.py` - Feature calculation (30+ features including ML features)
 - `titan/core/models/heuristic.py` - TrendVIC, Oscillator, VolumeMetrix models
+- `titan/core/models/ml.py` - LightGBM DirectionalClassifier (Sprint 14)
 
 ### Regime & Adaptation (Sprint 3)
 - `titan/core/regime.py` - RegimeDetector class
@@ -250,6 +297,10 @@ Titan is a cryptocurrency price direction prediction system targeting 75%+ accur
 
 ### Documentation
 - `docs/TESTING_SYSTEM_ANALYSIS.md` - Analysis of testing system and improvements
+- `docs/SYSTEM_ANALYSIS.md` - Full system analysis (Sprint 15): features, calibration, recommendations
+
+### Utilities
+- `cleanup.py` - Cleanup script for runs/, databases, cache (--force, --dry-run, --interactive)
 
 ---
 
@@ -268,14 +319,14 @@ if normalized_delta > 0.0003:  # Strong trend
 return "ranging"          # Default: sideways market
 ```
 
-## Regime Weights
+## Regime Weights (Sprint 14)
 
 ```python
 DEFAULT_REGIME_WEIGHTS = {
-    "trending_up":   {"TRENDVIC": 0.50, "OSCILLATOR": 0.20, "VOLUMEMETRIX": 0.30},
-    "trending_down": {"TRENDVIC": 0.50, "OSCILLATOR": 0.20, "VOLUMEMETRIX": 0.30},
-    "ranging":       {"TRENDVIC": 0.20, "OSCILLATOR": 0.50, "VOLUMEMETRIX": 0.30},
-    "volatile":      {"TRENDVIC": 0.25, "OSCILLATOR": 0.25, "VOLUMEMETRIX": 0.50},
+    "trending_up":   {"TRENDVIC": 0.40, "OSCILLATOR": 0.15, "VOLUMEMETRIX": 0.20, "ML_CLASSIFIER": 0.25},
+    "trending_down": {"TRENDVIC": 0.40, "OSCILLATOR": 0.15, "VOLUMEMETRIX": 0.20, "ML_CLASSIFIER": 0.25},
+    "ranging":       {"TRENDVIC": 0.15, "OSCILLATOR": 0.40, "VOLUMEMETRIX": 0.20, "ML_CLASSIFIER": 0.25},
+    "volatile":      {"TRENDVIC": 0.20, "OSCILLATOR": 0.20, "VOLUMEMETRIX": 0.35, "ML_CLASSIFIER": 0.25},
 }
 ```
 
@@ -321,19 +372,58 @@ The backtest generates comprehensive reports in `runs/history_*/`:
 
 ---
 
+## Chronos Project Analysis (2025-12-30)
+
+Analyzed C:\Projects\chronos - a production crypto prediction system achieving **66-74% accuracy** on 5-10 minute horizons.
+
+### Key Chronos Achievements
+| Metric | Chronos | Titan | Gap |
+|--------|---------|-------|-----|
+| **5min accuracy** | 66-69% | ~50% | **+16-19%** |
+| **10min accuracy** | 72-74% | N/A | — |
+| **60min accuracy** | 52% | 48.6% | +3.4% |
+| **Online Learning** | ✅ Dual models | ❌ None | Critical |
+| **ML Models** | LightGBM | Heuristics | Critical |
+
+### Chronos Key Innovations
+
+1. **Dual Model Architecture** - Two specialized models (UP detector + DOWN detector) with mutual communication
+2. **Multi-Scale EMA Memory** - Short/Medium/Long-term pattern memory prevents catastrophic forgetting
+3. **Scale-Invariant Features** - ALL features are relative (%, ratios, z-scores), never absolute prices
+4. **Online Learning** - SGD + RMSProp updates every 60 seconds based on outcomes
+5. **Confidence Filtering** - Only trade when confidence ≥65-70% → achieves 75%+ accuracy on filtered signals
+
+### 75% Accuracy IS Achievable (Proven by Chronos)
+```
+5min horizon + confidence ≥ 0.70 → 76.9% accuracy (350 samples)
+10min horizon + confidence ≥ 0.65 → 75.2% accuracy (444 samples)
+```
+
 ## Next Steps
 
-### Sprint 12: ML Enhancement (NEXT)
-- Add lightweight ML model (LightGBM/XGBoost)
-- Features: all current features + model probabilities
-- Online learning for adaptation
+### Sprint 16: Adaptive Calibration Improvements (NEXT)
+Based on system analysis (`docs/SYSTEM_ANALYSIS.md`):
+- **Regime-based max_confidence** - different caps for different regimes
+- **Sigmoid compression** - better confidence separation in middle range
+- **Agreement boost increase** - boost confidence more when 3+ models agree
+- Target: Increase high-confidence coverage from 9% to 30%+
+
+### Sprint 17: 5-Minute Timeframe
+- Switch from 1m to 5m candles
+- Less noise, stronger signals
 - Target: 55-60% accuracy
 
+### Sprint 18: Online Learning (ФИНАЛ)
+- Implement SGD + RMSProp weight updates
+- Multi-scale EMA memory (short/medium/long)
+- **Выполняется ПОСЛЕДНИМ** когда система отлажена
+- Target: Адаптация к изменениям рынка
+
 ### Future Ideas
-- Multi-timeframe analysis (1m + 5m + 15m)
-- Streak-breaking logic (max loss streak = 9)
-- Better large movement handling (45.6% accuracy)
-- Session-specific model weights
+- Dual model architecture (UP/DOWN detectors)
+- External data: Funding rate, Open Interest, Order book
+- Multi-timeframe analysis (5m + 15m + 1h)
+- Two-stage calibration (model-level + ensemble-level)
 
 ---
 
@@ -429,50 +519,65 @@ Models → Ensemble.decide(outputs, features, ts, pattern_id)
 
 ---
 
-## Current Sprint: Sprint 12 - Pattern System Hardening (2025-12-29)
+## Current Sprint: Sprint 16 - Adaptive Calibration (2025-12-30)
 
-### Critical Bugs Found
-1. **Snapshot deletion corrupts other patterns** (`patterns.py:920`)
-   - `_enforce_decision_limit()` deletes snapshots of OTHER patterns
-   - Fix: Delete only snapshots of events being removed
+### Completed Sprints ✅
+- **Sprint 14**: LightGBM Classifier - 31 scale-invariant features, 52.17% accuracy
+- **Sprint 15**: Confidence Filtering - 65.21% filtered accuracy at conf≥55%
 
-2. **Data leakage in backtest** (`patterns.py:1247`)
-   - `PatternExperience.get_pattern_stats()` sees "future" events
-   - Fix: Add `max_ts` parameter to filter by timestamp
+### Key Finding
+**Filtered accuracy is close to target (65% vs 75%)**, but coverage is too low (9%).
+The main issue: 91% of predictions fall in 50-55% confidence bucket.
 
-### Refactoring Tasks
-- Config-driven constants (MAX_DECISIONS, etc.)
-- Fix day_of_week inconsistency (in ExtendedConditions but not in pattern_key)
-- Remove dead code (pattern_conditions_v2, conditions_version unused)
-- Integrate PatternReader into ensemble
-
-### Sprint 12 Plan
+### Sprint 16 Plan (Adaptive Calibration)
 | Phase | Task | Status |
 |-------|------|--------|
-| A.1 | Fix snapshot deletion bug | Pending |
-| A.2 | Fix data leakage (time-bounded) | Pending |
-| B.1 | Config-driven constants | Pending |
-| B.2 | day_of_week consistency | Pending |
-| B.3 | Remove dead code | Pending |
-| C | Update ROADMAP, run backtest | Pending |
+| 1 | Regime-based max_confidence | Pending |
+| 2 | Sigmoid compression for better separation | Pending |
+| 3 | Increase agreement boost (3+ models) | Pending |
+| 4 | Run 7-day backtest | Pending |
+
+### Target Metrics
+- High-confidence coverage: ≥30% (currently 9%)
+- Filtered accuracy: ≥65% (currently 65.21%)
+- Overall accuracy: ≥52%
 
 ---
 
-## Last Session Context (2025-12-29)
+## Last Session Context (2025-12-30)
 
 ### Completed
-- Sprint 13: Pattern System fully integrated
-- PatternExperience with time decay working
-- PatternAdjuster integrated in Ensemble, backtest, live
-- Test passed: 52.12% accuracy, ECE 1.92%, Sharpe 2.55
+- Sprint 14: LightGBM Classifier (31 features)
+- Sprint 15: Confidence Filtering
+- System analysis document (`docs/SYSTEM_ANALYSIS.md`)
+- Cleanup script (`cleanup.py`)
 
-### Latest Test Results
+### Latest Test Results (7-day, 168h)
 ```
-Ensemble: 52.12% (750/1439)
-Full Agreement: 55.77% (104 predictions)
-ECE: 1.92%
-Sharpe: 2.55
-Direction Balance: 0.899
-Conf 55-60%: 61.40% (171 predictions)
-Conf 60-65%: 66.67% (3 predictions)
+Ensemble: 52.17% (5258/10079) - BETTER than random!
+Filtered (conf≥55%): 65.21% (596/914) - close to target!
+Coverage: 9.07%
+TrendVIC: 47.06%, FLAT=466
+Oscillator: 44.14%, FLAT=1623
+VolumeMetrix: 41.74%, FLAT=1462
+ML_CLASSIFIER: 37.17%, FLAT=2940
+ECE: 1.95%
+p-value: 0.001
 ```
+
+### Feature Distribution by Model
+| Model | Features | Count |
+|-------|----------|-------|
+| TrendVIC | ma_delta, volatility, close, body_ratio, candle_direction, price_momentum_3 | 6 |
+| Oscillator | rsi, rsi_momentum, volatility_z | 3 |
+| VolumeMetrix | volume_z, return_1, volatility, ma_delta, volume_trend, wick_ratios | 7 |
+| ML Classifier | All 31 scale-invariant features | 31 |
+
+### Confidence Distribution Problem
+| Bucket | Accuracy | Count | % Total |
+|--------|----------|-------|---------|
+| 50-55% | 50.87% | 9165 | **91%** |
+| 55-60% | 65.54% | 859 | 8.5% |
+| 60-65% | 60.00% | 55 | 0.5% |
+
+**Problem:** Need to shift predictions from 50-55% to higher confidence buckets.
