@@ -99,6 +99,20 @@ class FeatureStream:
         self._ema_10: Optional[float] = None  # EMA(10)
         self._ema_20: Optional[float] = None  # EMA(20)
 
+        # Sprint 16: New predictive features
+        self._up_volume: deque = deque(maxlen=20)  # Volume on UP candles
+        self._down_volume: deque = deque(maxlen=20)  # Volume on DOWN candles
+        self._typical_price_history: deque = deque(maxlen=20)  # For MFI
+        self._mf_positive: deque = deque(maxlen=14)  # Positive money flow
+        self._mf_negative: deque = deque(maxlen=14)  # Negative money flow
+        self._tr_history: deque = deque(maxlen=14)  # True range for ADX
+        self._plus_dm_history: deque = deque(maxlen=14)  # +DM for ADX
+        self._minus_dm_history: deque = deque(maxlen=14)  # -DM for ADX
+        self._dx_history: deque = deque(maxlen=14)  # DX for ADX smoothing
+        self._prev_high: Optional[float] = None
+        self._prev_low: Optional[float] = None
+        self._prev_typical_price: Optional[float] = None
+
     def update(self, candle: Candle) -> Optional[Dict[str, float]]:
         if self._prev_close is None:
             self._prev_close = candle.close
@@ -112,6 +126,10 @@ class FeatureStream:
             self._low_history.append(candle.low)
             self._ema_10 = candle.close
             self._ema_20 = candle.close
+            # Sprint 16: Initialize new feature tracking
+            self._prev_high = candle.high
+            self._prev_low = candle.low
+            self._prev_typical_price = (candle.high + candle.low + candle.close) / 3
             return None
 
         ret = (candle.close / self._prev_close) - 1.0
@@ -143,6 +161,52 @@ class FeatureStream:
             self._ema_20 = alpha_20 * candle.close + (1 - alpha_20) * self._ema_20
         else:
             self._ema_20 = candle.close
+
+        # Sprint 16: Update tracking for new features
+        # Volume imbalance - track volume on up/down candles
+        if candle.close >= candle.open:
+            self._up_volume.append(candle.volume)
+            self._down_volume.append(0.0)
+        else:
+            self._up_volume.append(0.0)
+            self._down_volume.append(candle.volume)
+
+        # Money Flow tracking for MFI
+        typical_price = (candle.high + candle.low + candle.close) / 3
+        raw_money_flow = typical_price * candle.volume
+        if self._prev_typical_price is not None:
+            if typical_price > self._prev_typical_price:
+                self._mf_positive.append(raw_money_flow)
+                self._mf_negative.append(0.0)
+            else:
+                self._mf_positive.append(0.0)
+                self._mf_negative.append(raw_money_flow)
+        self._prev_typical_price = typical_price
+
+        # ADX components - True Range, +DM, -DM
+        if self._prev_high is not None and self._prev_low is not None:
+            tr = max(
+                candle.high - candle.low,
+                abs(candle.high - self._prev_close),
+                abs(candle.low - self._prev_close)
+            )
+            self._tr_history.append(tr)
+
+            # +DM and -DM
+            up_move = candle.high - self._prev_high
+            down_move = self._prev_low - candle.low
+            if up_move > down_move and up_move > 0:
+                self._plus_dm_history.append(up_move)
+                self._minus_dm_history.append(0.0)
+            elif down_move > up_move and down_move > 0:
+                self._plus_dm_history.append(0.0)
+                self._minus_dm_history.append(down_move)
+            else:
+                self._plus_dm_history.append(0.0)
+                self._minus_dm_history.append(0.0)
+
+        self._prev_high = candle.high
+        self._prev_low = candle.low
 
         gain = max(ret, 0.0)
         loss = max(-ret, 0.0)
@@ -293,6 +357,53 @@ class FeatureStream:
         if vol_mean and vol_mean > 0:
             vol_ratio = (volatility or 0.0) / vol_mean
 
+        # Sprint 16: New predictive features
+        # 16. Volume Imbalance (ratio of up volume to total volume over 20 periods)
+        vol_imbalance_20 = 0.0
+        if len(self._up_volume) >= 10:  # Need at least 10 periods
+            total_up = sum(self._up_volume)
+            total_down = sum(self._down_volume)
+            total = total_up + total_down
+            if total > 0:
+                vol_imbalance_20 = (total_up - total_down) / total  # -1 to +1
+
+        # 17. Bollinger Band Position (where price is within the bands, 0-1)
+        bb_position = 0.5  # Default: middle of bands
+        if volatility is not None and ma_slow is not None and volatility > 0:
+            bb_upper = ma_slow + 2 * volatility * candle.close  # 2 std devs
+            bb_lower = ma_slow - 2 * volatility * candle.close
+            bb_width = bb_upper - bb_lower
+            if bb_width > 0:
+                bb_position = (candle.close - bb_lower) / bb_width
+                bb_position = max(0.0, min(1.0, bb_position))  # Clamp 0-1
+
+        # 18. ADX (Average Directional Index) - trend strength 0-100
+        adx = 0.0
+        if len(self._tr_history) >= 14:
+            atr_14 = sum(self._tr_history) / 14
+            plus_dm_14 = sum(self._plus_dm_history)
+            minus_dm_14 = sum(self._minus_dm_history)
+            if atr_14 > 0:
+                plus_di = 100 * plus_dm_14 / (atr_14 * 14)
+                minus_di = 100 * minus_dm_14 / (atr_14 * 14)
+                di_sum = plus_di + minus_di
+                if di_sum > 0:
+                    dx = 100 * abs(plus_di - minus_di) / di_sum
+                    self._dx_history.append(dx)
+                    if len(self._dx_history) >= 14:
+                        adx = sum(self._dx_history) / 14
+
+        # 19. MFI (Money Flow Index) - volume-weighted RSI, 0-100
+        mfi = 50.0  # Default: neutral
+        if len(self._mf_positive) >= 14:
+            pos_flow = sum(self._mf_positive)
+            neg_flow = sum(self._mf_negative)
+            if neg_flow > 0:
+                money_ratio = pos_flow / neg_flow
+                mfi = 100 - (100 / (1 + money_ratio))
+            elif pos_flow > 0:
+                mfi = 100.0
+
         return {
             "close": candle.close,
             "open": candle.open,
@@ -336,6 +447,11 @@ class FeatureStream:
             "volume_change_pct": volume_change_pct,
             "body_pct": body_pct,
             "vol_ratio": vol_ratio,
+            # Sprint 16: New predictive features
+            "vol_imbalance_20": vol_imbalance_20,
+            "bb_position": bb_position,
+            "adx": adx,
+            "mfi": mfi,
         }
 
 

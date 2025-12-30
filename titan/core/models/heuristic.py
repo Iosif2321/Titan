@@ -114,7 +114,20 @@ class TrendVIC(BaseModel):
            (ma_delta < 0 and price_momentum_3 < -0.001):
             confirmation *= 1.1  # Momentum confirms trend
 
-        strength = clamp(base_strength * confirmation, 0.0, 1.0)
+        # Sprint 16: Mean reversion adjustment
+        # Data shows candle_direction has -0.0609 correlation (mean reversion)
+        # Apply small contrarian adjustment
+        mean_reversion_adj = 1.0
+        if (ma_delta > 0 and candle_direction > 0) or \
+           (ma_delta < 0 and candle_direction < 0):
+            # Candle confirms trend, but mean reversion says opposite
+            mean_reversion_adj = 0.95  # Small penalty
+        elif (ma_delta > 0 and candle_direction < 0) or \
+             (ma_delta < 0 and candle_direction > 0):
+            # Candle contradicts trend, aligns with mean reversion
+            mean_reversion_adj = 1.05  # Small boost
+
+        strength = clamp(base_strength * confirmation * mean_reversion_adj, 0.0, 1.0)
 
         if ma_delta >= 0:
             prob_up = 0.5 + 0.5 * strength
@@ -139,7 +152,12 @@ class TrendVIC(BaseModel):
             prob_down = 0.5 + 0.5 * strength
             prob_up = 1.0 - prob_down
 
-        state = {"signal": signal, "strength": strength, "confirmation": confirmation}
+        state = {
+            "signal": signal,
+            "strength": strength,
+            "confirmation": confirmation,
+            "mean_reversion_adj": mean_reversion_adj,
+        }
         if pattern_context:
             state["pattern"] = _pattern_state_summary(pattern_context)
 
@@ -148,7 +166,7 @@ class TrendVIC(BaseModel):
             prob_up=prob_up,
             prob_down=prob_down,
             state=state,
-            metrics={"ma_delta": ma_delta, "body_ratio": body_ratio},
+            metrics={"ma_delta": ma_delta, "body_ratio": body_ratio, "candle_direction": candle_direction},
         )
 
 
@@ -173,6 +191,7 @@ class Oscillator(BaseModel):
         rsi = features.get("rsi", 50.0)
         rsi_momentum = features.get("rsi_momentum", 0.0)
         vol_z = features.get("volatility_z", 0.0)
+        bb_position = features.get("bb_position", 0.5)
 
         # Distance from equilibrium (50)
         distance_from_50 = abs(rsi - 50.0)
@@ -218,6 +237,25 @@ class Oscillator(BaseModel):
         elif vol_z > 1.0:
             strength *= 0.8
 
+        # Bollinger Band confirmation (Sprint 16)
+        # bb_position: 0 = lower band, 1 = upper band
+        # Mean reversion: low bb -> UP, high bb -> DOWN
+        bb_factor = 1.0
+        if rsi < 50:
+            # Expecting UP - confirm with low bb_position
+            if bb_position < 0.3:
+                bb_factor = 1.15  # Near lower band confirms oversold
+            elif bb_position > 0.7:
+                bb_factor = 0.85  # Near upper band contradicts
+        else:
+            # Expecting DOWN - confirm with high bb_position
+            if bb_position > 0.7:
+                bb_factor = 1.15  # Near upper band confirms overbought
+            elif bb_position < 0.3:
+                bb_factor = 0.85  # Near lower band contradicts
+
+        strength *= bb_factor
+
         # Clamp strength
         strength = clamp(strength, 0.05, 0.50)
 
@@ -249,6 +287,7 @@ class Oscillator(BaseModel):
             "signal": signal,
             "strength": strength,
             "momentum_factor": momentum_factor,
+            "bb_factor": bb_factor,
         }
         if pattern_context:
             state["pattern"] = _pattern_state_summary(pattern_context)
@@ -258,7 +297,7 @@ class Oscillator(BaseModel):
             prob_up=prob_up,
             prob_down=prob_down,
             state=state,
-            metrics={"rsi": rsi, "rsi_momentum": rsi_momentum},
+            metrics={"rsi": rsi, "rsi_momentum": rsi_momentum, "bb_position": bb_position},
         )
 
 
@@ -288,6 +327,8 @@ class VolumeMetrix(BaseModel):
         volume_trend = features.get("volume_trend", 0.0)
         upper_wick_ratio = features.get("upper_wick_ratio", 0.0)
         lower_wick_ratio = features.get("lower_wick_ratio", 0.0)
+        vol_imbalance = features.get("vol_imbalance_20", 0.0)
+        candle_dir = features.get("candle_direction", 0.0)
 
         # Normalize return by volatility to get "relative" move size
         ret_z = safe_div(abs(ret), volatility, 0.0)
@@ -347,6 +388,36 @@ class VolumeMetrix(BaseModel):
         if trend_aligned:
             strength = min(strength * 1.2, 0.45)
 
+        # Sprint 16: Volume imbalance (mean reversion signal)
+        # Positive imbalance (UP volume > DOWN) -> expect DOWN
+        # Negative imbalance (DOWN volume > UP) -> expect UP
+        imbalance_factor = 1.0
+        if direction == "UP" and vol_imbalance < -0.2:
+            # DOWN volume dominated -> expect reversal UP (confirms)
+            imbalance_factor = 1.10
+        elif direction == "DOWN" and vol_imbalance > 0.2:
+            # UP volume dominated -> expect reversal DOWN (confirms)
+            imbalance_factor = 1.10
+        elif direction == "UP" and vol_imbalance > 0.3:
+            # UP volume already dominated -> exhaustion, contradicts UP
+            imbalance_factor = 0.90
+        elif direction == "DOWN" and vol_imbalance < -0.3:
+            # DOWN volume already dominated -> exhaustion, contradicts DOWN
+            imbalance_factor = 0.90
+
+        strength *= imbalance_factor
+
+        # Sprint 16: Candle direction confirmation (mean reversion)
+        # Recent bullish candle -> expect DOWN (corr -0.0609)
+        # Recent bearish candle -> expect UP
+        candle_factor = 1.0
+        if direction == "UP" and candle_dir < 0:
+            candle_factor = 1.08  # Bearish candle -> reversal UP
+        elif direction == "DOWN" and candle_dir > 0:
+            candle_factor = 1.08  # Bullish candle -> reversal DOWN
+
+        strength *= candle_factor
+
         # Ensure minimum strength to avoid FLAT (threshold = 0.55)
         # prob = 0.5 + strength, need prob >= 0.55, so strength >= 0.05
         strength = max(strength, 0.05)
@@ -375,7 +446,13 @@ class VolumeMetrix(BaseModel):
             prob_up = 0.5 - strength
             prob_down = 0.5 + strength
 
-        state = {"signal": signal, "strength": strength, "pattern": pattern}
+        state = {
+            "signal": signal,
+            "strength": strength,
+            "pattern": pattern,
+            "imbalance_factor": imbalance_factor,
+            "candle_factor": candle_factor,
+        }
         if pattern_context:
             state["pattern"] = _pattern_state_summary(pattern_context)
 
@@ -389,5 +466,7 @@ class VolumeMetrix(BaseModel):
                 "return_1": ret,
                 "ret_z": ret_z,
                 "trend_aligned": 1.0 if trend_aligned else 0.0,
+                "vol_imbalance_20": vol_imbalance,
+                "candle_direction": candle_dir,
             },
         )
