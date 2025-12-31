@@ -13,7 +13,7 @@ Titan is a cryptocurrency price direction prediction system targeting 75%+ accur
 
 ---
 
-## Architecture
+## Architecture (Legacy - Heuristic Models)
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -61,6 +61,126 @@ Titan is a cryptocurrency price direction prediction system targeting 75%+ accur
 │  - Report generation                                            │
 └─────────────────────────────────────────────────────────────────┘
 ```
+
+---
+
+## NEW Architecture: Three-Head TFT Model (Sprint 23)
+
+**Заменяем 3 эвристические модели на 3 ML-модели с reinforcement learning.**
+
+### Общая архитектура
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    THREE-HEAD TFT MODEL                          │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  INPUTS:                                                         │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────────────┐ │
+│  │ Trend    │  │Oscillator│  │ Volume   │  │ Pattern History  │ │
+│  │ Features │  │ Features │  │ Features │  │ (last 50 events) │ │
+│  │ (12 dim) │  │ (10 dim) │  │ (8 dim)  │  │ + Aggregates     │ │
+│  └────┬─────┘  └────┬─────┘  └────┬─────┘  └────────┬─────────┘ │
+│       │             │             │                  │           │
+│       ▼             ▼             ▼                  ▼           │
+│  ┌─────────────────────────────────────────────────────────────┐│
+│  │              SHARED TFT ENCODER (hidden=64)                 ││
+│  │  - Variable Selection Network                               ││
+│  │  - LSTM Encoder (seq_len=100)                              ││
+│  │  - Multi-Head Attention (heads=4)                          ││
+│  │  - Gated Residual Network                                  ││
+│  └─────────────────────────────────────────────────────────────┘│
+│                              │                                   │
+│       ┌──────────────────────┼──────────────────────┐           │
+│       ▼                      ▼                      ▼           │
+│  ┌─────────┐           ┌─────────┐           ┌─────────┐        │
+│  │ TREND   │           │OSCILLAT │           │ VOLUME  │        │
+│  │  HEAD   │           │  HEAD   │           │  HEAD   │        │
+│  │(prob_up,│           │(prob_up,│           │(prob_up,│        │
+│  │prob_down│           │prob_down│           │prob_down│        │
+│  └─────────┘           └─────────┘           └─────────┘        │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Ключевые решения
+
+| Аспект | Решение | Обоснование |
+|--------|---------|-------------|
+| **Архитектура** | TFT (Temporal Fusion Transformer) | Читает большой контекст, interpretable |
+| **GPU** | GTX 1060 (6GB) | hidden=64, heads=4, seq=100 |
+| **Inputs** | Специализированные фичи для каждой головы | TrendML: MA, momentum; OscillatorML: RSI, BB; VolumeML: volume, MFI |
+| **Training** | Hybrid: Offline pretrain + Online fine-tune | Баланс стабильности и адаптации |
+| **Reward** | R2 (return-weighted) + streak bonus | `reward = return_pct * direction_match * streak_mult` |
+| **Patterns** | Агрегаты + Attention к последним 50 событиям | Summary + deep analysis |
+
+### Специализированные фичи
+
+**TrendML (12 features):**
+- ma_fast, ma_slow, ma_delta, ma_delta_pct
+- ema_10_spread_pct, ema_20_spread_pct
+- adx, price_momentum_3, return_5, return_10
+- body_ratio, candle_direction
+
+**OscillatorML (10 features):**
+- rsi, rsi_momentum, rsi_oversold, rsi_overbought
+- bb_position, stochastic_k, stochastic_d
+- mfi, upper_wick_ratio, lower_wick_ratio
+
+**VolumeML (8 features):**
+- volume_z, volume_trend, volume_change_pct
+- vol_imbalance_20, vol_ratio
+- atr_pct, high_low_range_pct, body_pct
+
+### Reward Function
+
+```python
+def calculate_reward(direction_match, return_pct, streak_length):
+    streak_mult = 1.0 + 0.1 * min(streak_length, 5)  # max 1.5x
+    reward = return_pct * direction_match * streak_mult
+    return reward
+```
+
+### Pattern Integration
+
+```python
+# Каждый prediction получает:
+pattern_input = {
+    # Агрегаты (быстрый summary)
+    "pattern_accuracy": 0.58,
+    "pattern_up_accuracy": 0.62,
+    "pattern_down_accuracy": 0.54,
+    "pattern_uses": 100,
+    "pattern_bias": "UP",
+
+    # Attention к последним 50 событиям паттерна
+    "pattern_events": [  # shape: (50, event_dim)
+        {"hit": True, "return_pct": 0.0012, "confidence": 0.58, ...},
+        ...
+    ]
+}
+```
+
+### Размеры для GTX 1060
+
+| Параметр | Значение | Memory |
+|----------|----------|--------|
+| hidden_dim | 64 | ~1.5GB model |
+| num_heads | 4 | |
+| lstm_layers | 2 | |
+| seq_len | 100 candles | |
+| pattern_events | 50 | |
+| batch_size | 32 | ~2GB training |
+| **Total** | | **~3.5GB** ✅ |
+
+### Файлы для создания
+
+| Файл | Описание |
+|------|----------|
+| `titan/core/models/tft.py` | Three-Head TFT Model |
+| `titan/core/models/heads.py` | Specialized prediction heads |
+| `titan/core/training/trainer.py` | Hybrid training loop |
+| `titan/core/training/reward.py` | Reward calculator |
 
 ---
 

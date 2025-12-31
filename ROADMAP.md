@@ -76,6 +76,85 @@
 
 С исправленным кодом система = random coin flip.
 
+---
+
+## SPRINT 23: Three-Head TFT Model (NEXT)
+
+**Заменяем 3 эвристические модели (TrendVIC, Oscillator, VolumeMetrix) на 3 ML-модели с RL-обучением.**
+
+### Архитектура
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    THREE-HEAD TFT MODEL                          │
+├─────────────────────────────────────────────────────────────────┤
+│  INPUTS:                                                         │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────────────┐ │
+│  │ Trend    │  │Oscillator│  │ Volume   │  │ Pattern History  │ │
+│  │ Features │  │ Features │  │ Features │  │ (50 events)      │ │
+│  │ (12 dim) │  │ (10 dim) │  │ (8 dim)  │  │ + Aggregates     │ │
+│  └────┬─────┘  └────┬─────┘  └────┬─────┘  └────────┬─────────┘ │
+│       ▼             ▼             ▼                  ▼           │
+│  ┌─────────────────────────────────────────────────────────────┐│
+│  │              SHARED TFT ENCODER (hidden=64)                 ││
+│  │  - Variable Selection Network                               ││
+│  │  - LSTM Encoder (seq_len=100)                              ││
+│  │  - Multi-Head Attention (heads=4)                          ││
+│  └─────────────────────────────────────────────────────────────┘│
+│       ┌──────────────────────┼──────────────────────┐           │
+│       ▼                      ▼                      ▼           │
+│  ┌─────────┐           ┌─────────┐           ┌─────────┐        │
+│  │ TREND   │           │OSCILLAT │           │ VOLUME  │        │
+│  │  HEAD   │           │  HEAD   │           │  HEAD   │        │
+│  └─────────┘           └─────────┘           └─────────┘        │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Ключевые решения
+
+| Аспект | Решение |
+|--------|---------|
+| **Архитектура** | TFT (Temporal Fusion Transformer) |
+| **GPU** | GTX 1060 (6GB) → hidden=64, heads=4, seq=100 |
+| **Inputs** | Специализированные фичи для каждой головы |
+| **Training** | Hybrid: Offline pretrain + Online fine-tune |
+| **Reward** | R2 (return-weighted) + streak bonus |
+| **Patterns** | Агрегаты + Attention к 50 событиям |
+
+### Reward Function
+
+```python
+reward = return_pct * direction_match * streak_mult
+# streak_mult = 1.0 + 0.1 * min(streak_length, 5)
+```
+
+### План реализации
+
+| Фаза | Задача | Статус |
+|------|--------|--------|
+| 1 | Создать `titan/core/models/tft.py` | ⏳ Pending |
+| 2 | Создать specialized prediction heads | ⏳ Pending |
+| 3 | Создать `titan/core/training/trainer.py` | ⏳ Pending |
+| 4 | Создать reward calculator | ⏳ Pending |
+| 5 | Интегрировать pattern attention | ⏳ Pending |
+| 6 | Offline pretraining на исторических данных | ⏳ Pending |
+| 7 | Online fine-tuning в live режиме | ⏳ Pending |
+| 8 | Backtest verification | ⏳ Pending |
+
+### Размеры для GTX 1060 (6GB)
+
+| Параметр | Значение |
+|----------|----------|
+| hidden_dim | 64 |
+| num_heads | 4 |
+| lstm_layers | 2 |
+| seq_len | 100 |
+| pattern_events | 50 |
+| batch_size | 32 |
+| **Estimated Memory** | ~3.5GB |
+
+---
+
 ### Проблема распределения уверенности
 | Bucket | Accuracy | Count | % Total |
 |--------|----------|-------|---------|
