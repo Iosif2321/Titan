@@ -1,5 +1,55 @@
 # План улучшений Titan v2
 
+## КРИТИЧЕСКИЙ ВЫВОД (2025-12-31)
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│    ⚠️  СИСТЕМА НЕ РАБОТАЕТ ЛУЧШЕ RANDOM (50%)  ⚠️               │
+├─────────────────────────────────────────────────────────────────┤
+│  После исправления багов TR/ADX, SessionAdapter, OnlineAdapter: │
+│                                                                  │
+│  • Accuracy: 49-51% (статистически = случайному)                │
+│  • p-value: 0.3-0.6 (NOT SIGNIFICANT)                           │
+│  • Все 50+ Optuna trials → pruned (~50% accuracy)               │
+│                                                                  │
+│  ВЫВОД: Предыдущие "успехи" (53.32%) были артефактом багов.     │
+│  Эвристические модели НЕ предсказывают BTC direction.           │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Исправленные баги (2025-12-31):
+
+| Баг | Файл | Проблема | Исправление |
+|-----|------|----------|-------------|
+| **TR/ADX** | `stream.py` | prev_close обновлялся ДО расчёта TR | Сохраняем prev_close перед обновлением |
+| **SessionAdapter** | `backtest.py`, `live.py` | params рассчитывались, но игнорировались (`_ = ...`) | Передаём params в ensemble.decide() |
+| **OnlineAdapter** | `backtest.py`, `live.py` | weights рассчитывались, но не применялись | Используем как fallback при disabled session_adapter |
+
+### Что это значит:
+
+1. **Эвристики (TrendVIC, Oscillator, VolumeMetrix)** — бесполезны для BTC 1-min prediction
+2. **Pattern System** — не даёт improvement при правильных фичах
+3. **Calibration pipeline** — не имеет смысла при random baseline
+4. **Optuna tuning** — бесполезен (оптимизируем шум)
+
+### Архитектурные решения:
+
+**Вариант A: ML-Only Architecture**
+- Выбросить все эвристики
+- Только LightGBM/XGBoost на правильных фичах
+- Риск: всё ещё может быть random на 1-min BTC
+
+**Вариант B: Multi-Timeframe Analysis**
+- Перейти на 5-15 минутные свечи (меньше шума)
+- Chronos показывает 66-74% на 5-10 min horizons
+- Комбинировать несколько timeframes
+
+**Вариант C: Признать пределы**
+- BTC 1-min prediction ближе к efficient market hypothesis
+- Переключиться на другие задачи (risk management, position sizing)
+
+---
+
 ## ВАЖНО: Принципы системы
 
 1. **FLAT = НЕЖЕЛАТЕЛЬНО** - Модели ОБЯЗАНЫ выдавать UP или DOWN каждую свечу
@@ -8,20 +58,23 @@
 
 ---
 
-## Текущее состояние (После Sprint 15 - 2025-12-30)
+## Текущее состояние (После Bug Fixes - 2025-12-31)
 
-| Метрика | Sprint 12 | Sprint 14 | Sprint 15 | Target |
-|---------|-----------|-----------|-----------|--------|
-| Ensemble Accuracy | 48.6% | 52.16% | **52.17%** ✅ | 75%+ |
-| **Filtered (≥55%)** | - | - | **65.21%** ✅ | 75%+ |
-| Coverage | - | - | **9.07%** ⚠️ | 30%+ |
-| ECE | 0.3% | 1.58% | **1.95%** ✅ | <5% |
-| p-value | 0.003 | 0.001 | **0.001** ✅ | <0.05 |
-| Sharpe Ratio | -23.7 | -7.6 | **-7.6** | >1.5 |
+| Метрика | До исправлений | После исправлений | Target |
+|---------|----------------|-------------------|--------|
+| Ensemble Accuracy | 53.32% (баг!) | **49-51%** ❌ | 75%+ |
+| p-value | 0.001 (баг!) | **0.3-0.6** ❌ | <0.05 |
+| ECE | 2.09% | **0.51-1.0%** ✅ | <5% |
+| Balance | 0.877 | **0.93-0.99** ✅ | >0.9 |
+| Sharpe | 33.1 (баг!) | **-5 to +15** ⚠️ | >1.5 |
 
-### КЛЮЧЕВОЕ ДОСТИЖЕНИЕ
-**Filtered accuracy 65.21%** при conf≥55% - близко к цели 75%!
-Но coverage только 9% - нужно увеличить до 30%+.
+### КРИТИЧЕСКИЙ ВЫВОД
+**Предыдущие "достижения" были артефактом багов.**
+- Баг TR/ADX создавал spurious correlation с future data
+- SessionAdapter params игнорировались
+- OnlineAdapter weights не применялись
+
+С исправленным кодом система = random coin flip.
 
 ### Проблема распределения уверенности
 | Bucket | Accuracy | Count | % Total |
@@ -1201,51 +1254,266 @@ Filtered accuracy близка к цели (65% vs 75%), но coverage слиш�
 
 ---
 
-## SPRINT 16: Adaptive Calibration Improvements (NEXT)
+## SPRINT 16: New Features (COMPLETED ✅)
 
-### Цель
-Увеличить долю high-confidence предсказаний с 9% до 30%+ без потери accuracy.
+### Добавленные фичи
+- `bb_position` - Position within Bollinger Bands [0, 1]
+- `vol_imbalance_20` - Volume imbalance over 20 periods
+- `adx` - Average Directional Index (trend strength)
+- `mfi` - Money Flow Index
 
-### 16.1 Regime-Based Max Confidence
+### Результат
+- Accuracy: 51.50% (статистически значимо, p=0.001)
+- ECE: 0.8%
+- Система достигла плато, требуется новый подход
+
+---
+
+## SPRINT 17: Session Adapter (NEXT)
+
+### Концепция
+**Per-session (ASIA/EUROPE/US) adaptation** весов моделей и параметров.
+
+Обоснование: 4% разница в accuracy между сессиями:
+- ASIA: 50.5%
+- EUROPE: 46.5% (worst)
+- US: 49.8%
+
+### 17.1 SessionMemory Schema (SQLite)
+
+```sql
+-- Per-session model statistics
+CREATE TABLE session_stats (
+    session TEXT NOT NULL,        -- 'ASIA', 'EUROPE', 'US'
+    model TEXT NOT NULL,
+    regime TEXT,
+    total INTEGER DEFAULT 0,
+    correct INTEGER DEFAULT 0,
+    conf_sum REAL DEFAULT 0,
+    return_sum REAL DEFAULT 0,
+    last_update INTEGER,
+    decay_total REAL DEFAULT 0,
+    decay_correct REAL DEFAULT 0,
+    PRIMARY KEY (session, model, regime)
+);
+
+-- Thompson Sampling for discrete parameters
+CREATE TABLE session_params (
+    session TEXT NOT NULL,
+    param_key TEXT NOT NULL,
+    param_value REAL NOT NULL,
+    total INTEGER DEFAULT 0,
+    correct INTEGER DEFAULT 0,
+    return_sum REAL DEFAULT 0,
+    last_tested INTEGER,
+    PRIMARY KEY (session, param_key, param_value)
+);
+
+-- Per-session confidence calibration
+CREATE TABLE session_calibration (
+    session TEXT NOT NULL,
+    bin_idx INTEGER NOT NULL,     -- 0-3 for bins [50-55, 55-60, 60-65, 65-70]
+    total INTEGER DEFAULT 0,
+    correct INTEGER DEFAULT 0,
+    conf_sum REAL DEFAULT 0,
+    PRIMARY KEY (session, bin_idx)
+);
+
+-- Stored session config
+CREATE TABLE session_config (
+    session TEXT PRIMARY KEY,
+    config_json TEXT,             -- Full config snapshot
+    updated_at INTEGER
+);
+```
+
+### 17.2 SessionAdapter Class
+
+**File:** `titan/core/adapters/session.py`
+
 ```python
-# Разный потолок уверенности для разных режимов
-REGIME_MAX_CONFIDENCE = {
-    "trending_up": 0.75,    # Best regime - allow higher confidence
-    "ranging": 0.70,        # Good regime
-    "trending_down": 0.65,  # Problematic regime
-    "volatile": 0.60,       # Worst regime - limit confidence
+class SessionAdapter:
+    """Per-session model configuration adapter."""
+
+    # Update frequencies (in predictions)
+    WEIGHT_UPDATE_FREQ = 50
+    PARAM_UPDATE_FREQ = 500
+    CALIBRATION_UPDATE_FREQ = 100
+
+    # Trust thresholds
+    MIN_SAMPLES = 50
+    MAX_CI_WIDTH = 0.10
+
+    # Decay
+    HALF_LIFE_HOURS = 168  # 1 week
+
+    def __init__(self, db_path: str, global_config: ConfigStore):
+        self._db = sqlite3.connect(db_path)
+        self._global = global_config
+        self._session_configs = {}
+        self._load_configs()
+
+    def get_session(self, ts: int) -> str:
+        """Determine trading session from timestamp."""
+        hour = datetime.fromtimestamp(ts, tz=timezone.utc).hour
+        if 0 <= hour < 8:
+            return "ASIA"
+        elif 8 <= hour < 16:
+            return "EUROPE"
+        else:
+            return "US"
+
+    def get_config(self, session: str) -> ConfigStore:
+        """Get session-specific config."""
+        return self._session_configs.get(session, self._global)
+
+    def get_weights(self, session: str, regime: str) -> Dict[str, float]:
+        """Get model weights for session/regime with shrinkage to global."""
+        stats = self._get_session_stats(session, regime)
+        global_stats = self._get_global_stats(regime)
+
+        weights = {}
+        for model in ["TRENDVIC", "OSCILLATOR", "VOLUMEMETRIX", "ML_CLASSIFIER"]:
+            # Shrinkage formula
+            k = 1000  # Prior strength (global)
+            n = stats[model].total
+
+            global_acc = global_stats[model].accuracy
+            session_acc = stats[model].accuracy if n > 0 else global_acc
+
+            effective_acc = (global_acc * k + session_acc * n) / (k + n)
+            weights[model] = effective_acc
+
+        # Normalize
+        total = sum(weights.values())
+        return {k: v / total for k, v in weights.items()}
+
+    def select_param(self, session: str, param_key: str) -> float:
+        """Thompson Sampling for discrete parameter selection."""
+        options = PARAM_OPTIONS[param_key]
+        posteriors = []
+
+        for opt in options:
+            stats = self._get_param_stats(session, param_key, opt)
+            alpha = stats.correct + 1
+            beta = stats.total - stats.correct + 1
+            sample = np.random.beta(alpha, beta)
+            posteriors.append(sample)
+
+        best_idx = np.argmax(posteriors)
+        return options[best_idx]
+
+    def calibrate_confidence(self, session: str, raw_conf: float) -> float:
+        """Temperature scaling for per-session calibration."""
+        bin_idx = self._get_bin(raw_conf)
+        bin_stats = self._get_calibration_stats(session, bin_idx)
+
+        # Blend with global if insufficient data
+        if bin_stats.total < 30:
+            global_stats = self._get_global_calibration(bin_idx)
+            bin_stats = self._blend_stats(bin_stats, global_stats)
+
+        if bin_stats.total == 0:
+            return raw_conf
+
+        empirical_acc = bin_stats.correct / bin_stats.total
+
+        # Temperature scaling
+        calibrated = 0.5 + (raw_conf - 0.5) * (empirical_acc - 0.5) / (raw_conf - 0.5 + 1e-6)
+        return max(0.50, min(0.70, calibrated))
+
+    def record_outcome(self, session: str, model: str, regime: str,
+                       hit: bool, conf: float, return_pct: float, ts: int):
+        """Record prediction outcome for learning."""
+        # Update stats with decay
+        self._update_stats_with_decay(session, model, regime, hit, conf, ts)
+
+        # Check if update needed
+        count = self._get_prediction_count(session)
+        if count % self.WEIGHT_UPDATE_FREQ == 0:
+            self._update_weights(session)
+        if count % self.PARAM_UPDATE_FREQ == 0:
+            self._update_params(session)
+        if count % self.CALIBRATION_UPDATE_FREQ == 0:
+            self._update_calibration(session)
+
+    def _update_stats_with_decay(self, session, model, regime, hit, conf, ts):
+        """Update stats with exponential decay."""
+        stats = self._get_session_stats_row(session, model, regime)
+
+        hours_since = (ts - stats.last_update) / 3600
+        decay = 0.5 ** (hours_since / self.HALF_LIFE_HOURS)
+
+        stats.decay_total *= decay
+        stats.decay_correct *= decay
+        stats.decay_total += 1
+        stats.decay_correct += (1 if hit else 0)
+        stats.last_update = ts
+
+        self._save_stats(session, model, regime, stats)
+
+    def _can_trust(self, stats) -> bool:
+        """Check if we have enough data to trust session stats."""
+        if stats.total < self.MIN_SAMPLES:
+            return False
+
+        # Wilson score interval
+        acc = stats.correct / stats.total
+        z = 1.96  # 95% CI
+        ci_width = 2 * z * np.sqrt(acc * (1 - acc) / stats.total)
+
+        return ci_width <= self.MAX_CI_WIDTH
+
+
+# Parameter options for Thompson Sampling
+PARAM_OPTIONS = {
+    "oscillator.rsi_oversold": [25, 28, 30, 32, 35],
+    "oscillator.rsi_overbought": [65, 68, 70, 72, 75],
+    "volumemetrix.vol_threshold": [1.0, 1.5, 2.0, 2.5],
+    "trendvic.dead_zone": [0.00003, 0.00005, 0.00007, 0.0001],
 }
 ```
 
-### 16.2 Sigmoid Compression
+### 17.3 Integration
+
+**backtest.py:**
 ```python
-def sigmoid_compress(strength, regime):
-    """Sigmoid вместо линейного сжатия для лучшего разделения."""
-    max_conf = REGIME_MAX_CONFIDENCE.get(regime, 0.70)
-    x = strength * 4 - 2  # Map [0, 1] to [-2, 2]
-    sigmoid = 1 / (1 + exp(-x))
-    return 0.5 + (max_conf - 0.5) * sigmoid
+def run_backtest(config, candles, ...):
+    session_adapter = SessionAdapter("session.db", config)
+
+    for candle in candles:
+        ts = candle.open_time
+        session = session_adapter.get_session(ts)
+
+        # Get session-specific config
+        session_config = session_adapter.get_config(session)
+
+        # Get session-specific weights
+        weights = session_adapter.get_weights(session, regime)
+
+        # Make prediction
+        decision = ensemble.decide(outputs, features, ts, pattern_id, weights)
+
+        # Calibrate confidence
+        decision.confidence = session_adapter.calibrate_confidence(
+            session, decision.confidence
+        )
+
+        # After evaluation, record outcome
+        session_adapter.record_outcome(
+            session, model, regime, hit, decision.confidence, return_pct, ts
+        )
 ```
 
-### 16.3 Agreement Boost Increase
-```python
-def calculate_confidence_boost(models_agree, regime_aligned, momentum_aligned):
-    boost = 0.0
-    if models_agree >= 3:
-        boost += 0.08  # Увеличено с 0.05
-    if regime_aligned:
-        boost += 0.03
-    if momentum_aligned:
-        boost += 0.02
-    return min(boost, 0.12)  # Max 12% boost
-```
-
-### 16.4 Критерии успеха Sprint 16
-- [ ] Regime-based max_confidence интегрирован
-- [ ] Sigmoid compression работает
-- [ ] Agreement boost увеличен
-- [ ] **ТЕСТ:** High-conf coverage > 20% (сейчас 9%)
-- [ ] **ТЕСТ:** Filtered accuracy ≥ 65%
+### 17.4 Критерии успеха Sprint 17
+- [ ] SessionMemory schema создан
+- [ ] SessionAdapter class реализован
+- [ ] Thompson Sampling для параметров работает
+- [ ] Decay mechanism (168h half-life) работает
+- [ ] Trust blocks (min 50 samples) работают
+- [ ] Интеграция в backtest.py
+- [ ] **ТЕСТ:** Per-session accuracy улучшена на 2-3%
+- [ ] **ТЕСТ:** EUROPE accuracy > 48% (было 46.5%)
 
 ---
 
@@ -1325,46 +1593,179 @@ long_ema   = 0.001 * new + 0.999 * old # ~1000 обновлений
 | Sprint 11: Ensemble | Agreement 55.77% | ✅ Done |
 | Sprint 13: Pattern System | No improvement ❌ | ✅ Done |
 | Sprint 12: Bug Fixes | Accuracy 48.6% ❌ | ✅ Done |
-| **Sprint 14: LightGBM** | **Accuracy 52.17%** ✅ | ✅ Done |
-| **Sprint 15: Confidence Filter** | **Filtered 65.21%** ✅ | ✅ Done |
+| Sprint 14: LightGBM | Accuracy 52.17% ✅ | ✅ Done |
+| Sprint 15: Confidence Filter | Filtered 65.21% ✅ | ✅ Done |
+| **Sprint 16: New Features** | **bb_position, adx, mfi** | ✅ Done |
 
-### Предстоящие спринты
-| Приоритет | Sprint | Ожидаемый эффект | Статус |
-|-----------|--------|------------------|--------|
-| **1** | **Sprint 16: Adaptive Calibration** | Coverage > 30% | ⏳ NEXT |
-| 2 | Sprint 17: 5-Minute Timeframe | Overall acc > 55% | ⏳ Pending |
-| 3 | Sprint 18: Online Learning | Адаптация к рынку (ФИНАЛ) | ⏳ Last |
+### Предстоящие спринты (4 Strategic Directions)
+| Приоритет | Sprint | Описание | Статус |
+|-----------|--------|----------|--------|
+| **1** | **Sprint 17: Session Adapter** | Per-session (ASIA/EUROPE/US) adaptation | ⏳ NEXT |
+| 2 | Sprint 18: ML Hardening | Time-split CV, calibration, leakage control | ⏳ Pending |
+| 3 | Sprint 19: 5-Minute Timeframe | Less noise, stronger signals | ⏳ Pending |
+| 4 | Sprint 20: Online Learning | SGD + RMSProp (FINAL) | ⏳ Last |
 
-**Ключевая проблема:** 91% предсказаний в 50-55% бакете.
-**Решение:** Улучшить распределение уверенности через адаптивную калибровку.
+### Strategic Directions Summary
+
+**Direction 1: Session Adapter** (Sprint 17)
+- Per-session model weights via shrinkage to global
+- Thompson Sampling for discrete parameters
+- Temperature scaling for calibration
+- 168h half-life decay
+- Trust blocks (50 samples, 10% CI width)
+
+**Direction 2: ML Hardening** (Sprint 18)
+- Time-split cross-validation
+- Isotonic regression calibration
+- Stricter feature selection
+
+**Direction 3: Data/Labeling** (Sprint 19)
+- ATR-relative thresholds
+- Noise filtering
+- Spread/commission modeling
+
+**Direction 4: Pattern Memory as Input** (Future)
+- Pattern stats as ML features
+- Not just confidence adjusters
+
+### Reinforcement Learning: Полный анализ
+
+#### Постановка задачи
+```
+State (s):    features + session + regime
+Action (a):   выбор весов моделей / параметров
+Reward (r):   +1 если предсказание верное, 0 иначе
+```
+
+**Ключевой вопрос:** Single-step или sequential decision problem?
+
+#### Сравнение типов RL
+
+| Тип RL | Описание | Подходит? | Почему |
+|--------|----------|-----------|--------|
+| **Multi-Armed Bandits** | Выбор из K действий без состояния | Частично | Не учитывает контекст |
+| **Contextual Bandits** | Выбор с учётом контекста | **Идеально** | Контекст = features, single-step |
+| **Q-Learning / DQN** | Табличный/нейросетевой Q(s,a) | Overkill | Нет sequential dependencies |
+| **Policy Gradient / PPO** | Прямая оптимизация policy | Overkill | Требует миллионы samples |
+
+#### Почему Contextual Bandits идеален
+
+```
+На каждом шаге t:
+1. Наблюдаем контекст x_t = (features, session, regime)
+2. Выбираем действие a_t = (веса, параметры)
+3. Получаем reward r_t = I(prediction correct)
+4. НЕТ перехода состояния (s_{t+1} не зависит от a_t)
+```
+
+**Критический момент:**
+```
+Full RL:      s_{t+1} = f(s_t, a_t)    # Действие меняет состояние
+Наша задача:  s_{t+1} = f(market)      # Состояние определяется рынком
+```
+
+#### Thompson Sampling: математика
+
+```python
+# Beta(α, β) posterior для каждого значения параметра
+# После каждого outcome:
+if hit: α += 1
+else:   β += 1
+
+# При выборе параметра:
+for v in options:
+    θ_v ~ Beta(α_v, β_v)
+select argmax(θ_v)
+
+# Свойства:
+# Beta(1, 1) = uniform prior
+# E[θ] = α / (α + β)
+# Variance уменьшается с данными
+```
+
+#### Data Efficiency
+
+| Метод | Samples до сходимости |
+|-------|----------------------|
+| Thompson Sampling | 100-500 per arm |
+| DQN | 100,000 - 1,000,000 |
+| PPO | 1,000,000 - 10,000,000 |
+
+У нас ~10,000 свечей/неделю. Thompson Sampling сойдётся за дни, DQN/PPO за месяцы.
+
+#### Когда Full RL был бы нужен
+
+**Scenario A: Portfolio Management**
+- Action: [buy 10%, hold, sell 5%]
+- s_{t+1} зависит от a_t (позиция изменилась)
+→ Full RL имеет смысл
+
+**Scenario B: Market Making**
+- Action: [bid_price, ask_price, size]
+- s_{t+1} сильно зависит от a_t
+→ Full RL обязателен
+
+**Наша задача не попадает в эти scenarios.**
+
+#### Вывод
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  РЕКОМЕНДАЦИЯ: Thompson Sampling (Contextual Bandits)       │
+├─────────────────────────────────────────────────────────────┤
+│  ✅ Идеально для single-step prediction                     │
+│  ✅ Простая реализация (~50 строк)                          │
+│  ✅ Не требует hyperparameter tuning                        │
+│  ✅ Data-efficient (100-500 samples per arm)               │
+│  ✅ Естественный exploration/exploitation                   │
+├─────────────────────────────────────────────────────────────┤
+│  ❌ Full RL (DQN/PPO) — overkill:                           │
+│     - Нет sequential dependencies                           │
+│     - Требует 100x больше данных                            │
+│     - 20x сложнее в реализации                              │
+│     - Нет доказанных преимуществ                           │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Ключевая проблема:** Система достигла плато ~51-52% accuracy.
+**Решение:** Per-session adaptation с Thompson Sampling для устранения 4% разрыва между сессиями.
 
 ---
 
 ## Целевые метрики (обновлено)
 
-| Метрика | Sprint 15 | Sprint 16 | Sprint 17 | Ultimate |
+| Метрика | Sprint 16 | Sprint 17 | Sprint 18 | Ultimate |
 |---------|-----------|-----------|-----------|----------|
-| Overall Accuracy | **52.17%** ✅ | 52-55% | 55-60% | 60%+ |
-| Filtered Accuracy | **65.21%** ✅ | 65-70% | 70-75% | **75%+** |
-| Coverage | **9.07%** ⚠️ | **30%+** | 40%+ | 50%+ |
+| Overall Accuracy | **51.50%** | 53-54% | 55-57% | 60%+ |
+| Session Gap | **4%** | **<2%** | <1% | 0% |
+| EUROPE Accuracy | **46.5%** | **≥49%** | ≥51% | ≥55% |
 | FLAT rate | **0%** ✅ | 0% | 0% | 0% |
 | p-value | **0.001** ✅ | <0.001 | <0.001 | <0.001 |
-| ECE | **1.95%** ✅ | <5% | <5% | <3% |
+| ECE | **0.8%** ✅ | <3% | <3% | <2% |
+
+### Per-Session Targets (Sprint 17)
+| Session | Current | Target |
+|---------|---------|--------|
+| ASIA | 50.5% | 52%+ |
+| EUROPE | 46.5% | 49%+ |
+| US | 49.8% | 52%+ |
 
 ---
 
 ## Файлы для создания/модификации
 
-### Новые файлы (Sprint 16-18):
-1. `titan/core/online.py` - OnlineLearner с RMSProp (Sprint 18)
+### Новые файлы (Sprint 17-20):
+1. `titan/core/adapters/session.py` - SessionAdapter класс (Sprint 17) ⏳ NEXT
+2. `titan/core/online.py` - OnlineLearner с RMSProp (Sprint 20)
 
-### Модификации (Sprint 16):
-1. `titan/core/calibration.py` - Sigmoid compression, regime-based max
-2. `titan/core/ensemble.py` - Enhanced agreement boost
+### Модификации (Sprint 17):
+1. `titan/core/backtest.py` - Интеграция SessionAdapter
+2. `titan/core/live.py` - Интеграция SessionAdapter
+3. `titan/core/ensemble.py` - Поддержка внешних весов
 
 ### Завершённые файлы:
 - `titan/core/models/ml.py` ✅ (Sprint 14)
-- `titan/core/features/stream.py` ✅ (31 features)
+- `titan/core/features/stream.py` ✅ (35+ features, включая bb_position, adx, mfi)
 - `titan/core/backtest.py` ✅ (filtered accuracy tracking)
 - `titan/core/strategies/volatile.py` ✅
 - `titan/core/detectors/exhaustion.py` ✅

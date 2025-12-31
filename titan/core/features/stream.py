@@ -134,6 +134,8 @@ class FeatureStream:
 
         ret = (candle.close / self._prev_close) - 1.0
         log_ret = math.log(candle.close / self._prev_close)
+        # BUG FIX: Save prev_close for TR calculation BEFORE updating
+        prev_close_for_tr = self._prev_close
         self._prev_close = candle.close
 
         self._price_fast.append(candle.close)
@@ -184,11 +186,12 @@ class FeatureStream:
         self._prev_typical_price = typical_price
 
         # ADX components - True Range, +DM, -DM
+        # BUG FIX: Use prev_close_for_tr (the ACTUAL previous close, not current)
         if self._prev_high is not None and self._prev_low is not None:
             tr = max(
                 candle.high - candle.low,
-                abs(candle.high - self._prev_close),
-                abs(candle.low - self._prev_close)
+                abs(candle.high - prev_close_for_tr),
+                abs(candle.low - prev_close_for_tr)
             )
             self._tr_history.append(tr)
 

@@ -6,6 +6,7 @@ from typing import Dict, List
 from titan.core.backtest import run_backtest
 from titan.core.history import resolve_range, run_history_backtest
 from titan.core.live import run_live
+from titan.core.tuner import create_tuner, HAS_OPTUNA
 
 
 def _default_run_id() -> str:
@@ -118,6 +119,32 @@ def main() -> None:
         help="Store downloaded candles in SQLite",
     )
 
+    tune = sub.add_parser("tune", help="Hyperparameter optimization with Optuna")
+    tune.add_argument("--csv", required=True, help="Path to 1m OHLCV CSV for optimization")
+    tune.add_argument("--db", default="titan.db", help="SQLite DB path")
+    tune.add_argument("--out", default="runs", help="Output directory")
+    tune.add_argument("--trials", type=int, default=100, help="Number of optimization trials")
+    tune.add_argument("--timeout", type=int, default=None, help="Total timeout in seconds")
+    tune.add_argument("--timeout-per-trial", type=int, default=300, help="Timeout per trial in seconds")
+    tune.add_argument(
+        "--objective",
+        choices=["accuracy", "sharpe", "multi"],
+        default="accuracy",
+        help="Optimization objective",
+    )
+    tune.add_argument(
+        "--pruner",
+        choices=["median", "hyperband", "none"],
+        default="median",
+        help="Pruner algorithm for early stopping",
+    )
+    tune.add_argument("--jobs", type=int, default=1, help="Number of parallel jobs")
+    tune.add_argument(
+        "--no-visualize",
+        action="store_true",
+        help="Skip generating visualizations",
+    )
+
     args = parser.parse_args()
 
     if args.command == "backtest":
@@ -164,6 +191,91 @@ def main() -> None:
             prefill_minutes=args.prefill_minutes,
             eval_buffer=not args.no_eval_buffer,
         )
+    elif args.command == "tune":
+        if not HAS_OPTUNA:
+            raise SystemExit(
+                "Optuna is required for hyperparameter tuning.\n"
+                "Install with: pip install optuna"
+            )
+
+        run_id = time.strftime("tune_%Y%m%d_%H%M%S")
+        out_dir = os.path.join(args.out, run_id)
+        os.makedirs(out_dir, exist_ok=True)
+
+        print(f"Starting hyperparameter optimization...")
+        print(f"  Trials: {args.trials}")
+        print(f"  Objective: {args.objective}")
+        print(f"  Pruner: {args.pruner}")
+        print(f"  Output: {out_dir}")
+        print()
+
+        # Create tuner
+        from titan.core.tuner import TunerConfig, AutoTuner
+
+        config = TunerConfig(
+            n_trials=args.trials,
+            timeout_per_trial=args.timeout_per_trial,
+            objective_type=args.objective,
+            pruner_type=args.pruner,
+            n_jobs=args.jobs,
+        )
+
+        tuner = AutoTuner(db_path=args.db, config=config)
+
+        # Run optimization
+        best_params = tuner.optimize(
+            candles_path=args.csv,
+            timeout_total=args.timeout,
+        )
+
+        # Save results
+        summary = tuner.get_summary()
+        results_path = os.path.join(out_dir, "optimization_results.json")
+        tuner.save_results(results_path)
+
+        # Export best config
+        config_path = os.path.join(out_dir, "config_optimized.json")
+        tuner.export_config(config_path)
+
+        # Generate visualizations
+        if not args.no_visualize:
+            viz_dir = os.path.join(out_dir, "visualizations")
+            try:
+                tuner.visualize(viz_dir)
+                print(f"\n  Visualizations saved to: {viz_dir}")
+            except Exception as e:
+                print(f"\n  Warning: Failed to generate visualizations: {e}")
+
+        # Print summary
+        print("\n" + "=" * 60)
+        print("OPTIMIZATION COMPLETE")
+        print("=" * 60)
+        print(f"Total trials: {summary['total_trials']}")
+        print(f"  Completed: {summary['completed_trials']}")
+        print(f"  Pruned: {summary['pruned_trials']}")
+        print(f"  Failed: {summary['failed_trials']}")
+
+        if summary.get('best_accuracy'):
+            print(f"\nBest Results:")
+            print(f"  Accuracy: {summary['best_accuracy']:.4f}")
+            if 'best_sharpe' in summary:
+                print(f"  Sharpe: {summary['best_sharpe']:.2f}")
+
+        if summary.get('avg_accuracy'):
+            print(f"\nAverage (completed trials):")
+            print(f"  Accuracy: {summary['avg_accuracy']:.4f}")
+            print(f"  ECE: {summary['avg_ece']:.4f}")
+            print(f"  Sharpe: {summary['avg_sharpe']:.2f}")
+            print(f"  Duration: {summary['avg_duration']:.1f}s")
+
+        print(f"\nBest Parameters:")
+        for key, value in best_params.items():
+            print(f"  {key}: {value}")
+
+        print(f"\nResults saved to:")
+        print(f"  - {results_path}")
+        print(f"  - {config_path}")
+        print()
 
 
 if __name__ == "__main__":

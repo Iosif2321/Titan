@@ -4,9 +4,11 @@ import os
 import sys
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 from titan.core.adapters.pattern import PatternAdjuster, PatternModelAdjuster, PatternReader
+from titan.core.adapters.session import SessionAdapter
+from titan.core.online import OnlineAdapter, create_online_adapter
 from titan.core.analysis import PredictionAnalyzer, PredictionDetail, StatisticalValidator
 from titan.core.calibration import OnlineCalibrator
 from titan.core.config import ConfigStore
@@ -15,6 +17,7 @@ from titan.core.features.stream import FeatureStream, build_conditions
 from titan.core.models.heuristic import Oscillator, TrendVIC, VolumeMetrix
 from titan.core.models.ml import DirectionalClassifier, create_ml_classifier, HAS_LIGHTGBM
 from titan.core.ensemble import Ensemble
+from titan.core.fusion import TransformerFusion, create_fusion, HAS_TORCH
 from titan.core.monitor import PerformanceMonitor
 from titan.core.patterns import PatternExperience, PatternStore
 from titan.core.regime import RegimeDetector
@@ -1276,8 +1279,9 @@ def run_backtest(
     target_start_ts: Optional[int] = None,
     target_end_ts: Optional[int] = None,
     verbose: bool = True,
-) -> Dict[str, object]:
-    """Run backtest and return summary dict.
+    return_stats: bool = False,
+) -> Union[Dict[str, object], "BacktestStats"]:
+    """Run backtest and return summary dict or stats object.
 
     Args:
         csv_path: Path to OHLCV CSV file
@@ -1289,9 +1293,10 @@ def run_backtest(
         target_start_ts: Only record predictions at/after this ts (UTC seconds)
         target_end_ts: Only record predictions at/before this ts (UTC seconds)
         verbose: Print progress and summary to console
+        return_stats: If True, return BacktestStats object instead of summary dict
 
     Returns:
-        Summary dictionary with all metrics
+        Summary dictionary with all metrics, or BacktestStats object if return_stats=True
     """
     os.makedirs(out_dir, exist_ok=True)
 
@@ -1311,6 +1316,29 @@ def run_backtest(
     model_adjuster_enabled = bool(
         config_store.get("pattern.model_adjuster_enabled", False)
     )
+
+    # Sprint 17: Create session adapter for per-session adaptation
+    session_db_path = db_path.replace(".db", "_session.db") if db_path.endswith(".db") else db_path + "_session"
+    session_adapter_enabled = bool(config_store.get("session_adapter.enabled", True))
+    session_adapter = SessionAdapter(
+        session_db_path,
+        config_store,
+        enabled=session_adapter_enabled,
+    )
+    if verbose and session_adapter_enabled:
+        print(f"[Backtest] Session Adapter enabled (Thompson Sampling)")
+
+    # Sprint 20: Create online learning adapter
+    online_enabled = bool(config_store.get("online.enabled", True))
+    online_adapter = create_online_adapter(config_store, enabled=online_enabled)
+    if verbose and online_enabled:
+        print(f"[Backtest] Online Learning enabled (SGD + RMSProp)")
+
+    # Sprint 21: Create transformer fusion
+    fusion_enabled = bool(config_store.get("fusion.enabled", False)) and HAS_TORCH
+    fusion = create_fusion(config_store, n_models=4) if fusion_enabled else None
+    if verbose and fusion_enabled:
+        print(f"[Backtest] Transformer Fusion enabled")
 
     # Create regime detector and performance monitor
     regime_detector = RegimeDetector(config_store)
@@ -1347,6 +1375,7 @@ def run_backtest(
         weight_manager,
         regime_detector=regime_detector,
         pattern_adjuster=pattern_adjuster,
+        fusion=fusion,
     )
     calibrator = OnlineCalibrator(config_store)
 
@@ -1513,6 +1542,55 @@ def run_backtest(
                     },
                 )
                 prediction_analyzer.add(pred_detail)
+
+                # Sprint 17: Record outcome to session adapter for learning
+                if session_adapter_enabled:
+                    session = session_adapter.get_session(pending.ts)
+                    is_hit = pending.decision.direction == outcome.actual_direction
+                    for output in pending.outputs:
+                        model_dir = model_decisions[output.model_name]
+                        model_hit = model_dir == outcome.actual_direction
+                        session_adapter.record_outcome(
+                            session=session,
+                            model=output.model_name,
+                            regime=pending_regime,
+                            hit=model_hit,
+                            conf=max(output.prob_up, output.prob_down),
+                            return_pct=outcome.return_pct,
+                            ts=pending.ts,
+                        )
+                    # Also record ensemble outcome
+                    session_adapter.record_outcome(
+                        session=session,
+                        model="ENSEMBLE",
+                        regime=pending_regime,
+                        hit=is_hit,
+                        conf=pending.decision.confidence,
+                        return_pct=outcome.return_pct,
+                        ts=pending.ts,
+                    )
+
+                # Sprint 20: Record outcome to online learning adapter
+                if online_enabled:
+                    model_confs = {
+                        output.model_name: max(output.prob_up, output.prob_down)
+                        for output in pending.outputs
+                    }
+                    online_adapter.record_outcome(
+                        model_decisions=model_decisions,
+                        actual_direction=outcome.actual_direction,
+                        model_confs=model_confs,
+                        ensemble_hit=pending.decision.direction == outcome.actual_direction,
+                        return_pct=outcome.return_pct,
+                    )
+
+                # Sprint 21: Update fusion with outcome for online learning
+                if fusion_enabled and fusion is not None:
+                    fusion.update(
+                        model_outputs=pending.outputs,
+                        features=pending.features,
+                        actual_direction=outcome.actual_direction,
+                    )
             else:
                 skipped_predictions += 1
 
@@ -1552,15 +1630,39 @@ def run_backtest(
                 for output in outputs
             ]
         # Sprint 13: Pass pattern_id for experience-based adjustment
+        # Sprint 17: Get session-specific weights if enabled
+        override_weights = None
+        current_session = None
+        session_params = None
+        if session_adapter_enabled:
+            current_session = session_adapter.get_session(candle.ts)
+            current_regime = regime_detector.detect(features)
+            override_weights = session_adapter.get_weights(current_session, current_regime)
+            # BUG FIX: Actually use the Thompson Sampling params instead of discarding
+            session_params = session_adapter.get_all_params(current_session)
+        elif online_enabled:
+            # BUG FIX: Use online-learned weights when session adapter is disabled
+            online_weights = online_adapter.get_weights()
+            if online_weights:
+                override_weights = online_weights
+
         decision = ensemble.decide(
             outputs,
             features,
             ts=candle.ts,
             pattern_id=pattern_id if pattern_id > 0 else None,
+            override_weights=override_weights,
+            override_params=session_params,
         )
+
+        # Apply calibration: first online calibrator, then session-specific
+        calibrated_conf = calibrator.calibrate(decision.confidence)
+        if session_adapter_enabled and current_session:
+            calibrated_conf = session_adapter.calibrate_confidence(current_session, calibrated_conf)
+
         decision = Decision(
             direction=decision.direction,
-            confidence=calibrator.calibrate(decision.confidence),
+            confidence=calibrated_conf,
             prob_up=decision.prob_up,
             prob_down=decision.prob_down,
         )
@@ -1610,6 +1712,28 @@ def run_backtest(
     # NEW: Add advanced analysis
     summary["advanced_analysis"] = prediction_analyzer.full_summary()
 
+    # Sprint 17: Add session adapter summary
+    if session_adapter_enabled:
+        summary["session_adapter"] = {
+            "enabled": True,
+            "sessions": {
+                session: session_adapter.get_session_summary(session)
+                for session in ["ASIA", "EUROPE", "US"]
+            },
+        }
+        session_adapter.close()
+    else:
+        summary["session_adapter"] = {"enabled": False}
+
+    # Sprint 20: Add online learning summary
+    summary["online_learning"] = online_adapter.summary()
+
+    # Sprint 21: Add fusion summary
+    if fusion_enabled and fusion is not None:
+        summary["fusion"] = fusion.get_training_stats()
+    else:
+        summary["fusion"] = {"enabled": False}
+
     if tune_weights:
         tuned = _tune_weights(stats, config_store)
         weight_manager.set_model_weights(tuned)
@@ -1647,4 +1771,7 @@ def run_backtest(
                 print(f"    {name}: {weight:.4f}")
         print()
 
+    # Return stats object if requested (for tuner), else summary dict
+    if return_stats:
+        return stats
     return summary

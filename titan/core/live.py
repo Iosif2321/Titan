@@ -5,6 +5,8 @@ import time
 from typing import Dict, Optional
 
 from titan.core.adapters.pattern import PatternAdjuster, PatternModelAdjuster, PatternReader
+from titan.core.adapters.session import SessionAdapter
+from titan.core.online import create_online_adapter
 from titan.core.backtest import BacktestStats, DetailWriter, _evaluate, _model_decision, _tune_weights
 from titan.core.calibration import OnlineCalibrator
 from titan.core.config import ConfigStore
@@ -15,6 +17,7 @@ from titan.core.features.stream import FeatureStream, build_conditions
 from titan.core.models.heuristic import Oscillator, TrendVIC, VolumeMetrix
 from titan.core.ensemble import Ensemble
 from titan.core.patterns import PatternExperience, PatternStore
+from titan.core.regime import RegimeDetector
 from titan.core.state_store import StateStore
 from titan.core.types import Decision, PatternContext, PredictionRecord
 from titan.core.weights import WeightManager
@@ -65,6 +68,26 @@ async def live_loop(
     model_adjuster_enabled = bool(
         config_store.get("pattern.model_adjuster_enabled", False)
     )
+
+    # Sprint 17: Create session adapter for per-session adaptation
+    session_db_path = db_path.replace(".db", "_session.db") if db_path.endswith(".db") else db_path + "_session"
+    session_adapter_enabled = bool(config_store.get("session_adapter.enabled", True))
+    session_adapter = SessionAdapter(
+        session_db_path,
+        config_store,
+        enabled=session_adapter_enabled,
+    )
+    if session_adapter_enabled:
+        print(f"[Live] Session Adapter enabled (Thompson Sampling)")
+
+    # Sprint 20: Create online learning adapter
+    online_enabled = bool(config_store.get("online.enabled", True))
+    online_adapter = create_online_adapter(config_store, enabled=online_enabled)
+    if online_enabled:
+        print(f"[Live] Online Learning enabled (SGD + RMSProp)")
+
+    # Create regime detector for session weights
+    regime_detector = RegimeDetector(config_store)
 
     models = [
         TrendVIC(config_store),
@@ -169,6 +192,48 @@ async def live_loop(
             detail_writer.write(pending, outcome, model_decisions)
             evaluated += 1
 
+            # Sprint 17: Record outcome to session adapter for learning
+            if session_adapter_enabled:
+                session = session_adapter.get_session(pending.ts)
+                pending_regime = regime_detector.detect(pending.features)
+                is_hit = pending.decision.direction == outcome.actual_direction
+                for output in pending.outputs:
+                    model_dir = model_decisions[output.model_name]
+                    model_hit = model_dir == outcome.actual_direction
+                    session_adapter.record_outcome(
+                        session=session,
+                        model=output.model_name,
+                        regime=pending_regime,
+                        hit=model_hit,
+                        conf=max(output.prob_up, output.prob_down),
+                        return_pct=outcome.return_pct,
+                        ts=pending.ts,
+                    )
+                # Also record ensemble outcome
+                session_adapter.record_outcome(
+                    session=session,
+                    model="ENSEMBLE",
+                    regime=pending_regime,
+                    hit=is_hit,
+                    conf=pending.decision.confidence,
+                    return_pct=outcome.return_pct,
+                    ts=pending.ts,
+                )
+
+            # Sprint 20: Record outcome to online learning adapter
+            if online_enabled:
+                model_confs = {
+                    output.model_name: max(output.prob_up, output.prob_down)
+                    for output in pending.outputs
+                }
+                online_adapter.record_outcome(
+                    model_decisions=model_decisions,
+                    actual_direction=outcome.actual_direction,
+                    model_confs=model_confs,
+                    ensemble_hit=pending.decision.direction == outcome.actual_direction,
+                    return_pct=outcome.return_pct,
+                )
+
             if tune_weights:
                 tuned = _tune_weights(stats, config_store)
                 weight_manager.set_model_weights(tuned)
@@ -202,13 +267,38 @@ async def live_loop(
                 )
                 for output in outputs
             ]
+
+        # Sprint 17: Get session-specific weights if enabled
+        override_weights = None
+        current_session = None
+        session_params = None
+        if session_adapter_enabled:
+            current_session = session_adapter.get_session(candle.ts)
+            current_regime = regime_detector.detect(features)
+            override_weights = session_adapter.get_weights(current_session, current_regime)
+            # BUG FIX: Actually use the Thompson Sampling params
+            session_params = session_adapter.get_all_params(current_session)
+        elif online_enabled:
+            # BUG FIX: Use online-learned weights when session adapter is disabled
+            online_weights = online_adapter.get_weights()
+            if online_weights:
+                override_weights = online_weights
+
         # Sprint 13: Pass pattern_id for experience-based adjustment
         decision = ensemble.decide(
-            outputs, features, ts=candle.ts, pattern_id=pattern_id
+            outputs, features, ts=candle.ts, pattern_id=pattern_id,
+            override_weights=override_weights,
+            override_params=session_params,
         )
+
+        # Apply calibration: first online calibrator, then session-specific
+        calibrated_conf = calibrator.calibrate(decision.confidence)
+        if session_adapter_enabled and current_session:
+            calibrated_conf = session_adapter.calibrate_confidence(current_session, calibrated_conf)
+
         decision = Decision(
             direction=decision.direction,
-            confidence=calibrator.calibrate(decision.confidence),
+            confidence=calibrated_conf,
             prob_up=decision.prob_up,
             prob_down=decision.prob_down,
         )
@@ -293,6 +383,22 @@ async def live_loop(
         # Sprint 12: Run pattern lifecycle maintenance
         lifecycle = pattern_store.run_lifecycle_maintenance()
         summary["pattern_lifecycle"] = lifecycle
+
+        # Sprint 17: Session Adapter summary
+        if session_adapter_enabled:
+            summary["session_adapter"] = {
+                "enabled": True,
+                "sessions": {
+                    session: session_adapter.get_session_summary(session)
+                    for session in ["ASIA", "EUROPE", "US"]
+                },
+            }
+            session_adapter.close()
+        else:
+            summary["session_adapter"] = {"enabled": False}
+
+        # Sprint 20: Online Learning summary
+        summary["online_learning"] = online_adapter.summary()
 
         summary_path = os.path.join(out_dir, "summary.json")
         with open(summary_path, "w", encoding="utf-8") as handle:

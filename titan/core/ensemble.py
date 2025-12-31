@@ -11,6 +11,7 @@ from titan.core.weights import AdaptiveWeightManager, WeightManager
 
 if TYPE_CHECKING:
     from titan.core.adapters.pattern import PatternAdjuster
+    from titan.core.fusion import TransformerFusion
     from titan.core.regime import RegimeDetector
 
 
@@ -31,11 +32,13 @@ class Ensemble:
         weights: Union[WeightManager, AdaptiveWeightManager],
         regime_detector: Optional["RegimeDetector"] = None,
         pattern_adjuster: Optional["PatternAdjuster"] = None,
+        fusion: Optional["TransformerFusion"] = None,
     ) -> None:
         self._config = config
         self._weights = weights
         self._regime_detector = regime_detector
         self._pattern_adjuster = pattern_adjuster
+        self._fusion = fusion
         self._last_regime: Optional[str] = None
         self._compressor = ConfidenceCompressor(config)
         self._volatile_strategy = VolatileStrategy(config)
@@ -94,6 +97,8 @@ class Ensemble:
         features: Optional[Dict[str, float]] = None,
         ts: Optional[int] = None,
         pattern_id: Optional[int] = None,
+        override_weights: Optional[Dict[str, float]] = None,
+        override_params: Optional[Dict[str, float]] = None,
     ) -> Decision:
         """Make ensemble decision from model outputs.
 
@@ -102,10 +107,17 @@ class Ensemble:
             features: Current market features (used for regime detection)
             ts: Unix timestamp for temporal adjustments
             pattern_id: Current pattern ID for experience-based adjustment
+            override_weights: Optional weights to use instead of default (Sprint 17: SessionAdapter)
+            override_params: Optional params to override config (Sprint 17: SessionAdapter Thompson Sampling)
 
         Returns:
             Combined decision with direction, confidence, and probabilities
         """
+        # Helper to get param with override support
+        def get_param(key: str, default: float) -> float:
+            if override_params and key in override_params:
+                return float(override_params[key])
+            return float(self._config.get(key, default))
         # Detect regime if features available
         regime: Optional[str] = None
         if features and self._regime_detector:
@@ -147,54 +159,68 @@ class Ensemble:
                     prob_down=trending_decision.prob_down,
                 )
 
-        # Get weights - regime-aware if using AdaptiveWeightManager
-        if isinstance(self._weights, AdaptiveWeightManager) and regime:
-            weights = self._weights.get_model_weights(regime)
+        # Sprint 21: Use TransformerFusion if available and enabled
+        if self._fusion and self._fusion.enabled:
+            fusion_up, fusion_down = self._fusion.forward(outputs, features)
+            prob_up = fusion_up
+            prob_down = fusion_down
         else:
-            weights = self._weights.get_model_weights()
+            # Get weights - use override if provided (Sprint 17: SessionAdapter)
+            # Otherwise use regime-aware if using AdaptiveWeightManager
+            if override_weights is not None:
+                weights = override_weights
+            elif isinstance(self._weights, AdaptiveWeightManager) and regime:
+                weights = self._weights.get_model_weights(regime)
+            else:
+                weights = self._weights.get_model_weights()
 
-        flat_threshold = float(self._config.get("ensemble.flat_threshold", 0.55))
-        min_margin = float(self._config.get("ensemble.min_margin", 0.05))
+            flat_threshold = get_param("ensemble.flat_threshold", 0.55)
+            min_margin = get_param("ensemble.min_margin", 0.05)
 
-        # Additional volatility-based adjustments (legacy behavior)
-        if features:
-            vol_z = float(features.get("volatility_z", 0.0))
-            vol_high = float(self._config.get("ensemble.vol_z_high", 1.0))
-            if vol_z >= vol_high:
-                scale = clamp(
-                    float(self._config.get("ensemble.trendvic_high_scale", 0.6)),
-                    0.0,
-                    1.0,
-                )
-                if "TRENDVIC" in weights:
-                    weights["TRENDVIC"] = max(weights["TRENDVIC"] * scale, 0.0)
-                flat_threshold = clamp(
-                    flat_threshold
-                    + float(self._config.get("ensemble.high_vol_flat_add", 0.0)),
-                    0.0,
-                    1.0,
-                )
-                min_margin = max(
-                    min_margin
-                    + float(self._config.get("ensemble.high_vol_margin_add", 0.0)),
-                    0.0,
-                )
+            # Additional volatility-based adjustments (legacy behavior)
+            if features:
+                vol_z = float(features.get("volatility_z", 0.0))
+                vol_high = float(self._config.get("ensemble.vol_z_high", 1.0))
+                if vol_z >= vol_high:
+                    scale = clamp(
+                        float(self._config.get("ensemble.trendvic_high_scale", 0.6)),
+                        0.0,
+                        1.0,
+                    )
+                    if "TRENDVIC" in weights:
+                        weights["TRENDVIC"] = max(weights["TRENDVIC"] * scale, 0.0)
+                    flat_threshold = clamp(
+                        flat_threshold
+                        + float(self._config.get("ensemble.high_vol_flat_add", 0.0)),
+                        0.0,
+                        1.0,
+                    )
+                    min_margin = max(
+                        min_margin
+                        + float(self._config.get("ensemble.high_vol_margin_add", 0.0)),
+                        0.0,
+                    )
 
-        weighted_up = 0.0
-        weighted_down = 0.0
-        total_weight = 0.0
+            weighted_up = 0.0
+            weighted_down = 0.0
+            total_weight = 0.0
 
-        for output in outputs:
-            weight = float(weights.get(output.model_name, 1.0))
-            weighted_up += weight * output.prob_up
-            weighted_down += weight * output.prob_down
-            total_weight += weight
+            for output in outputs:
+                weight = float(weights.get(output.model_name, 1.0))
+                weighted_up += weight * output.prob_up
+                weighted_down += weight * output.prob_down
+                total_weight += weight
 
-        if total_weight <= 0:
-            total_weight = 1.0
+            if total_weight <= 0:
+                total_weight = 1.0
 
-        prob_up = weighted_up / total_weight
-        prob_down = weighted_down / total_weight
+            prob_up = weighted_up / total_weight
+            prob_down = weighted_down / total_weight
+
+        # Define thresholds (needed for direction logic below)
+        # Use get_param to respect override_params from SessionAdapter
+        flat_threshold = get_param("ensemble.flat_threshold", 0.55)
+        min_margin = get_param("ensemble.min_margin", 0.05)
         confidence = max(prob_up, prob_down)
         margin = abs(prob_up - prob_down)
 
@@ -208,8 +234,8 @@ class Ensemble:
             direction = "UP" if prob_up >= prob_down else "DOWN"
         else:
             # Truly tied (margin < 1%) - still pick one, FLAT is last resort
-            # Use the raw weighted values to break ties
-            direction = "UP" if weighted_up >= weighted_down else "DOWN"
+            # Use prob_up/prob_down to break ties (works with both fusion and weighted)
+            direction = "UP" if prob_up >= prob_down else "DOWN"
 
         # Apply confidence compression to fix overconfidence problem
         # High confidence (65%+) historically has LOWER accuracy (33-47%)
