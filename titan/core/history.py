@@ -70,6 +70,9 @@ def run_history_backtest(
     prefill_minutes: Optional[float] = None,
     eval_buffer: bool = True,
     verbose: bool = True,
+    use_two_head: bool = False,
+    two_head_checkpoint: Optional[str] = None,
+    two_head_model_class: str = "TwoHeadMLP",
 ) -> Dict[str, object]:
     """Download historical candles and run backtest.
 
@@ -237,4 +240,7 @@ def run_history_backtest(
         target_start_ts=target_start_ts,
         target_end_ts=target_end_ts,
         verbose=verbose,
+        use_two_head=use_two_head,
+        two_head_checkpoint=two_head_checkpoint,
+        two_head_model_class=two_head_model_class,
     )

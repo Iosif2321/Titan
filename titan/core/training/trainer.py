@@ -12,7 +12,7 @@ Reward function (R2 with streak bonus):
 """
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, Iterator, List, Optional, Tuple
 
 import torch
@@ -23,10 +23,17 @@ from torch.utils.data import Dataset, DataLoader
 from titan.core.config import ConfigStore
 from titan.core.models.tft import (
     ThreeHeadTFT,
-    ALL_FEATURES,
+    TwoHeadMLP,
+    SessionEmbeddingMLP,
+    SessionGatedMLP,
+    SESSION_TO_IDX,
     TREND_FEATURES,
     OSCILLATOR_FEATURES,
     VOLUME_FEATURES,
+)
+from titan.core.features.calculator import (
+    ALL_FEATURES,
+    compute_and_normalize_batch,
 )
 
 
@@ -38,13 +45,24 @@ class TrainingConfig:
     epochs: int = 100
     seq_len: int = 100
     gradient_clip: float = 1.0
-    weight_decay: float = 0.01
+    # Gemini recommendation: Aggressive regularization to reduce 90%/54% gap
+    weight_decay: float = 0.05  # Was 0.01, increased for better generalization
+    dropout: float = 0.4  # New: High dropout to prevent overfitting on noisy crypto data
     warmup_steps: int = 100
     early_stopping_patience: int = 10
     early_stopping_delta: float = 0.001
     val_split: float = 0.2
     checkpoint_dir: str = "checkpoints"
     log_interval: int = 100
+    # Session-aware loss weighting (P1): Higher weight = more focus on that session
+    # Default: equal weights. Set higher for worst-performing session (e.g., ASIA: 1.5)
+    # 4 sessions aligned with patterns.py
+    session_weights: Dict[str, float] = field(default_factory=lambda: {
+        "ASIA": 1.0,
+        "EUROPE": 1.0,
+        "OVERLAP": 1.0,
+        "US": 1.0,
+    })
 
 
 class RewardCalculator:
@@ -125,6 +143,7 @@ class TFTDataset(Dataset):
         candles_path: str,
         seq_len: int = 100,
         feature_cols: Optional[List[str]] = None,
+        label_horizon: int = 1,
     ):
         """Initialize dataset from candles CSV.
 
@@ -132,23 +151,35 @@ class TFTDataset(Dataset):
             candles_path: Path to candles CSV file
             seq_len: Sequence length for model input
             feature_cols: Feature column names (default: ALL_FEATURES)
+            label_horizon: Number of future bars for label (1 = next-bar, 3 = smoothed-3)
+                          For 1m timeframe use 1, for aggregated/smoothed use higher.
+                          Default: 1 (next-bar, no smoothing)
         """
         self.seq_len = seq_len
         self.feature_cols = feature_cols or ALL_FEATURES
+        self.label_horizon = label_horizon
 
-        # Load and preprocess data
-        self.data = self._load_data(candles_path)
-        self.labels = self._compute_labels()
+        # Load and preprocess data (also stores timestamps)
+        self.data, self.timestamps = self._load_data(candles_path)
+        self.labels = self._compute_labels(smoothing_window=label_horizon)
 
         # Validate
         if len(self.data) < seq_len + 1:
             raise ValueError(f"Not enough data: {len(self.data)} < {seq_len + 1}")
 
-    def _load_data(self, path: str) -> torch.Tensor:
-        """Load candles CSV and convert to tensor."""
+    def _load_data(self, path: str) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Load candles CSV and convert to tensor.
+
+        Returns:
+            Tuple of (features tensor, timestamps tensor)
+        """
         import pandas as pd
+        import numpy as np
 
         df = pd.read_csv(path)
+
+        # Store timestamps before feature computation
+        timestamps = df["timestamp"].values.copy() if "timestamp" in df.columns else np.arange(len(df))
 
         # Compute features from OHLCV if needed
         df = self._compute_features(df)
@@ -162,128 +193,39 @@ class TFTDataset(Dataset):
                 feature_data.append(np.zeros(len(df)))
 
         # Stack and transpose to [n_samples, n_features]
-        import numpy as np
         data = np.stack(feature_data, axis=1).astype(np.float32)
 
-        return torch.from_numpy(data)
+        return torch.from_numpy(data), torch.from_numpy(timestamps.astype(np.int64))
 
     def _compute_features(self, df) -> "pd.DataFrame":
-        """Compute technical features from OHLCV."""
+        """Compute technical features from OHLCV.
+
+        Uses unified calculator module to ensure train/inference consistency.
+        """
+        return compute_and_normalize_batch(df)
+
+    def _compute_labels(self, smoothing_window: int = 1) -> torch.Tensor:
+        """Compute direction labels (1 for UP, 0 for DOWN).
+
+        For 1m timeframe: use smoothing_window=1 (next-bar only, no smoothing).
+        For aggregated horizons: use smoothing_window=N to sum next N returns.
+
+        Args:
+            smoothing_window: Number of future returns to sum.
+                             1 = next-bar (default for 1m timeframe)
+                             3 = smoothed-3 (for aggregated predictions)
+        """
         import numpy as np
 
-        # Basic features
-        df["return_1"] = df["close"].pct_change().fillna(0)
-
-        # Moving averages
-        df["ma_fast"] = df["close"].rolling(5).mean()
-        df["ma_slow"] = df["close"].rolling(20).mean()
-        df["ma_delta"] = df["ma_fast"] - df["ma_slow"]
-        df["ma_delta_pct"] = df["ma_delta"] / df["close"]
-
-        # EMAs
-        df["ema_10"] = df["close"].ewm(span=10).mean()
-        df["ema_20"] = df["close"].ewm(span=20).mean()
-        df["ema_10_spread_pct"] = (df["close"] - df["ema_10"]) / df["close"]
-        df["ema_20_spread_pct"] = (df["close"] - df["ema_20"]) / df["close"]
-
-        # Volatility
-        df["volatility"] = df["return_1"].rolling(20).std()
-        vol_mean = df["volatility"].rolling(100).mean()
-        vol_std = df["volatility"].rolling(100).std()
-        df["volatility_z"] = (df["volatility"] - vol_mean) / (vol_std + 1e-10)
-
-        # Volume
-        df["volume_ma"] = df["volume"].rolling(20).mean()
-        df["volume_std"] = df["volume"].rolling(20).std()
-        df["volume_z"] = (df["volume"] - df["volume_ma"]) / (df["volume_std"] + 1e-10)
-        df["volume_trend"] = (df["volume"] > df["volume_ma"]).astype(float)
-        df["volume_change_pct"] = df["volume"].pct_change().fillna(0)
-
-        # RSI
-        delta = df["close"].diff()
-        gain = delta.where(delta > 0, 0).rolling(14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-        rs = gain / (loss + 1e-10)
-        df["rsi"] = 100 - (100 / (1 + rs))
-        df["rsi_momentum"] = df["rsi"].diff()
-        df["rsi_oversold"] = (df["rsi"] < 30).astype(float)
-        df["rsi_overbought"] = (df["rsi"] > 70).astype(float)
-
-        # Price momentum
-        df["price_momentum_3"] = df["close"].pct_change(3)
-        df["return_5"] = df["close"].pct_change(5)
-        df["return_10"] = df["close"].pct_change(10)
-
-        # Candle features
-        df["body"] = abs(df["close"] - df["open"])
-        df["range"] = df["high"] - df["low"]
-        df["body_ratio"] = df["body"] / (df["range"] + 1e-10)
-        df["candle_direction"] = (df["close"] > df["open"]).astype(float)
-        df["upper_wick"] = df["high"] - df[["open", "close"]].max(axis=1)
-        df["lower_wick"] = df[["open", "close"]].min(axis=1) - df["low"]
-        df["upper_wick_ratio"] = df["upper_wick"] / (df["range"] + 1e-10)
-        df["lower_wick_ratio"] = df["lower_wick"] / (df["range"] + 1e-10)
-        df["body_pct"] = df["body"] / df["close"]
-        df["high_low_range_pct"] = df["range"] / df["close"]
-
-        # ATR
-        df["tr"] = np.maximum(
-            df["high"] - df["low"],
-            np.maximum(
-                abs(df["high"] - df["close"].shift(1)),
-                abs(df["low"] - df["close"].shift(1))
-            )
-        )
-        df["atr"] = df["tr"].rolling(14).mean()
-        df["atr_pct"] = df["atr"] / df["close"]
-
-        # ADX (simplified)
-        plus_dm = df["high"].diff()
-        minus_dm = -df["low"].diff()
-        plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0)
-        minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0)
-        df["adx"] = (plus_dm.rolling(14).mean() + minus_dm.rolling(14).mean()) / 2
-
-        # Bollinger Bands position
-        bb_mid = df["close"].rolling(20).mean()
-        bb_std = df["close"].rolling(20).std()
-        df["bb_position"] = (df["close"] - bb_mid) / (2 * bb_std + 1e-10)
-
-        # Stochastic
-        low_14 = df["low"].rolling(14).min()
-        high_14 = df["high"].rolling(14).max()
-        df["stochastic_k"] = (df["close"] - low_14) / (high_14 - low_14 + 1e-10) * 100
-        df["stochastic_d"] = df["stochastic_k"].rolling(3).mean()
-
-        # MFI (Money Flow Index)
-        typical_price = (df["high"] + df["low"] + df["close"]) / 3
-        money_flow = typical_price * df["volume"]
-        positive_flow = money_flow.where(typical_price > typical_price.shift(1), 0).rolling(14).sum()
-        negative_flow = money_flow.where(typical_price < typical_price.shift(1), 0).rolling(14).sum()
-        df["mfi"] = 100 - (100 / (1 + positive_flow / (negative_flow + 1e-10)))
-
-        # Volume ratio and imbalance
-        df["vol_ratio"] = df["volume"] / (df["volume_ma"] + 1e-10)
-        df["vol_imbalance_20"] = df["volume"].rolling(20).apply(
-            lambda x: (x[x > x.mean()].sum() - x[x <= x.mean()].sum()) / (x.sum() + 1e-10)
-        )
-
-        # Fill NaN values
-        df = df.fillna(0)
-
-        return df
-
-    def _compute_labels(self) -> torch.Tensor:
-        """Compute direction labels (1 for UP, 0 for DOWN)."""
-        # Label is next period's direction based on return
-        # Use return_1 shifted by -1 (look-ahead)
         return_idx = self.feature_cols.index("return_1") if "return_1" in self.feature_cols else 0
-
-        # Get returns and shift to get future direction
         returns = self.data[:, return_idx].numpy()
-        import numpy as np
+
         labels = np.zeros(len(returns))
-        labels[:-1] = (returns[1:] > 0).astype(float)
+
+        # Smoothed target: sum of next N returns
+        for i in range(len(returns) - smoothing_window):
+            future_returns = returns[i + 1:i + 1 + smoothing_window]
+            labels[i] = 1.0 if np.sum(future_returns) > 0 else 0.0
 
         return torch.from_numpy(labels).float()
 
@@ -301,6 +243,7 @@ class TFTDataset(Dataset):
             volume_features: [n_vol]
             label: scalar (0 or 1)
             return_pct: scalar (actual return for reward)
+            timestamp: int64 (Unix timestamp for session detection)
         """
         # Sequence
         sequence = self.data[idx:idx + self.seq_len]
@@ -332,7 +275,34 @@ class TFTDataset(Dataset):
         return_idx = self.feature_cols.index("return_1") if "return_1" in self.feature_cols else 0
         return_pct = self.data[idx + self.seq_len, return_idx] if idx + self.seq_len < len(self.data) else 0.0
 
-        return sequence, trend_features, osc_features, vol_features, label, return_pct
+        # Get timestamp for session detection
+        timestamp = self.timestamps[idx + self.seq_len - 1]
+
+        return sequence, trend_features, osc_features, vol_features, label, return_pct, timestamp
+
+    @staticmethod
+    def get_session(timestamp: int) -> str:
+        """Get trading session from Unix timestamp.
+
+        Sessions (UTC) - aligned with patterns.py:get_trading_session:
+        - ASIA: 00:00 - 08:00 and 22:00 - 24:00 (Tokyo, Hong Kong, Singapore)
+        - EUROPE: 08:00 - 13:00 (London, Frankfurt)
+        - OVERLAP: 13:00 - 17:00 (London + New York overlap)
+        - US: 17:00 - 22:00 (New York)
+        """
+        from datetime import datetime, timezone
+        dt = datetime.fromtimestamp(timestamp, tz=timezone.utc)
+        hour = dt.hour
+        if 0 <= hour < 8:
+            return "ASIA"
+        elif 8 <= hour < 13:
+            return "EUROPE"
+        elif 13 <= hour < 17:
+            return "OVERLAP"
+        elif 17 <= hour < 22:
+            return "US"
+        else:  # 22-23
+            return "ASIA"
 
 
 class TFTTrainer:
@@ -472,14 +442,17 @@ class TFTTrainer:
         return history
 
     def _train_epoch(self, loader: DataLoader) -> Tuple[float, float]:
-        """Train for one epoch."""
+        """Train for one epoch with session-aware loss weighting (P1)."""
         self.model.train()
         total_loss = 0.0
         correct = 0
         total = 0
 
+        # Per-sample criterion for session weighting
+        criterion_none = nn.CrossEntropyLoss(reduction='none')
+
         for batch in loader:
-            sequence, trend_feat, osc_feat, vol_feat, labels, _ = batch
+            sequence, trend_feat, osc_feat, vol_feat, labels, _, timestamps = batch
 
             # Move to device
             sequence = sequence.to(self.device)
@@ -488,18 +461,49 @@ class TFTTrainer:
             vol_feat = vol_feat.to(self.device)
             labels = labels.to(self.device).long()
 
-            # Forward pass
-            self.optimizer.zero_grad()
-            trend_probs, osc_probs, vol_probs, _ = self.model(
-                sequence, trend_feat, osc_feat, vol_feat
-            )
+            # Compute per-sample session info (for P1 weighting and P2 gating)
+            session_weights = torch.ones(len(labels), device=self.device)
+            session_idx = torch.zeros(len(labels), dtype=torch.long, device=self.device)
+            for i, ts in enumerate(timestamps):
+                session = TFTDataset.get_session(ts.item())
+                session_weights[i] = self.training_config.session_weights.get(session, 1.0)
+                session_idx[i] = SESSION_TO_IDX.get(session, 0)
 
-            # Combined loss from all heads
-            loss = (
-                self.criterion(trend_probs, labels) +
-                self.criterion(osc_probs, labels) +
-                self.criterion(vol_probs, labels)
-            ) / 3
+            # Forward pass with logits for training
+            self.optimizer.zero_grad()
+            if isinstance(self.model, (SessionGatedMLP, SessionEmbeddingMLP)):
+                # P2/P2.5: Pass session_idx to session-aware models
+                trend_probs, osc_probs, vol_probs, aux = self.model(
+                    sequence, trend_feat, osc_feat, vol_feat, session_idx, return_logits=True
+                )
+            else:
+                trend_probs, osc_probs, vol_probs, aux = self.model(
+                    sequence, trend_feat, osc_feat, vol_feat, return_logits=True
+                )
+
+            # Use LOGITS for CrossEntropyLoss (not probs!)
+            trend_logits = aux["trend_logits"]
+            osc_logits = aux["osc_logits"]
+            vol_logits = aux["vol_logits"]
+
+            # Combined loss from all heads using logits with session weighting
+            # For TwoHeadMLP/SessionGatedMLP: osc_logits == vol_logits (same aux head)
+            # Use 1/2 trend + 1/2 aux to avoid double-counting aux
+            if isinstance(self.model, (TwoHeadMLP, SessionGatedMLP, SessionEmbeddingMLP)):
+                per_sample_loss = (
+                    criterion_none(trend_logits, labels) +
+                    criterion_none(osc_logits, labels)
+                ) / 2
+            else:
+                per_sample_loss = (
+                    criterion_none(trend_logits, labels) +
+                    criterion_none(osc_logits, labels) +
+                    criterion_none(vol_logits, labels)
+                ) / 3
+
+            # Apply session weights and mean (weighted average)
+            weighted_loss = per_sample_loss * session_weights
+            loss = weighted_loss.mean()
 
             # Backward pass
             loss.backward()
@@ -516,8 +520,11 @@ class TFTTrainer:
             # Statistics
             total_loss += loss.item() * len(labels)
 
-            # Accuracy (use ensemble of all heads)
-            ensemble_probs = (trend_probs + osc_probs + vol_probs) / 3
+            # Accuracy (TwoHeadMLP/SessionGatedMLP: 1/2 trend + 1/2 aux)
+            if isinstance(self.model, (TwoHeadMLP, SessionGatedMLP, SessionEmbeddingMLP)):
+                ensemble_probs = (trend_probs + osc_probs) / 2
+            else:
+                ensemble_probs = (trend_probs + osc_probs + vol_probs) / 3
             predictions = ensemble_probs.argmax(dim=1)
             correct += (predictions == labels).sum().item()
             total += len(labels)
@@ -532,10 +539,12 @@ class TFTTrainer:
         total_loss = 0.0
         correct = 0
         total = 0
+        is_two_head = isinstance(self.model, (TwoHeadMLP, SessionGatedMLP, SessionEmbeddingMLP))
+        is_session_gated = isinstance(self.model, (SessionGatedMLP, SessionEmbeddingMLP))
 
         with torch.no_grad():
             for batch in loader:
-                sequence, trend_feat, osc_feat, vol_feat, labels, _ = batch
+                sequence, trend_feat, osc_feat, vol_feat, labels, _, timestamps = batch
 
                 # Move to device
                 sequence = sequence.to(self.device)
@@ -544,27 +553,167 @@ class TFTTrainer:
                 vol_feat = vol_feat.to(self.device)
                 labels = labels.to(self.device).long()
 
-                # Forward pass
-                trend_probs, osc_probs, vol_probs, _ = self.model(
-                    sequence, trend_feat, osc_feat, vol_feat
-                )
+                # Forward pass with logits for loss calculation
+                if is_session_gated:
+                    # Compute session_idx for P2 session gating
+                    session_idx = torch.zeros(len(labels), dtype=torch.long, device=self.device)
+                    for i, ts in enumerate(timestamps):
+                        session = TFTDataset.get_session(ts.item())
+                        session_idx[i] = SESSION_TO_IDX.get(session, 0)
+                    trend_probs, osc_probs, vol_probs, aux = self.model(
+                        sequence, trend_feat, osc_feat, vol_feat, session_idx, return_logits=True
+                    )
+                else:
+                    trend_probs, osc_probs, vol_probs, aux = self.model(
+                        sequence, trend_feat, osc_feat, vol_feat, return_logits=True
+                    )
 
-                # Combined loss
-                loss = (
-                    self.criterion(trend_probs, labels) +
-                    self.criterion(osc_probs, labels) +
-                    self.criterion(vol_probs, labels)
-                ) / 3
+                # Use LOGITS for loss
+                trend_logits = aux["trend_logits"]
+                osc_logits = aux["osc_logits"]
+                vol_logits = aux["vol_logits"]
+
+                # Combined loss using logits (TwoHeadMLP/SessionGatedMLP: 1/2 + 1/2)
+                if is_two_head:
+                    loss = (
+                        self.criterion(trend_logits, labels) +
+                        self.criterion(osc_logits, labels)
+                    ) / 2
+                else:
+                    loss = (
+                        self.criterion(trend_logits, labels) +
+                        self.criterion(osc_logits, labels) +
+                        self.criterion(vol_logits, labels)
+                    ) / 3
 
                 total_loss += loss.item() * len(labels)
 
-                # Accuracy
-                ensemble_probs = (trend_probs + osc_probs + vol_probs) / 3
+                # Accuracy (TwoHeadMLP/SessionGatedMLP: 1/2 trend + 1/2 aux)
+                if is_two_head:
+                    ensemble_probs = (trend_probs + osc_probs) / 2
+                else:
+                    ensemble_probs = (trend_probs + osc_probs + vol_probs) / 3
                 predictions = ensemble_probs.argmax(dim=1)
                 correct += (predictions == labels).sum().item()
                 total += len(labels)
 
         return total_loss / total, correct / total
+
+    def validate_with_session_breakdown(
+        self, loader: DataLoader
+    ) -> Dict[str, Dict[str, float]]:
+        """Validate model with per-session accuracy breakdown.
+
+        Returns:
+            Dict with overall and per-session stats:
+            {
+                "overall": {"loss": 0.5, "accuracy": 0.54, "total": 1000},
+                "ASIA": {"accuracy": 0.55, "total": 350, "correct": 192},
+                "EUROPE": {"accuracy": 0.52, "total": 300, "correct": 156},
+                "US": {"accuracy": 0.54, "total": 350, "correct": 189},
+            }
+        """
+        self.model.eval()
+        total_loss = 0.0
+        correct = 0
+        total = 0
+        is_two_head = isinstance(self.model, (TwoHeadMLP, SessionGatedMLP, SessionEmbeddingMLP))
+        is_session_gated = isinstance(self.model, (SessionGatedMLP, SessionEmbeddingMLP))
+
+        # Per-session tracking
+        # 4 sessions aligned with patterns.py
+        session_stats = {
+            "ASIA": {"correct": 0, "total": 0},
+            "EUROPE": {"correct": 0, "total": 0},
+            "OVERLAP": {"correct": 0, "total": 0},
+            "US": {"correct": 0, "total": 0},
+        }
+
+        with torch.no_grad():
+            for batch in loader:
+                sequence, trend_feat, osc_feat, vol_feat, labels, _, timestamps = batch
+
+                # Move to device
+                sequence = sequence.to(self.device)
+                trend_feat = trend_feat.to(self.device)
+                osc_feat = osc_feat.to(self.device)
+                vol_feat = vol_feat.to(self.device)
+                labels = labels.to(self.device).long()
+
+                # Compute session info for all samples
+                sessions = [TFTDataset.get_session(ts.item()) for ts in timestamps]
+                session_idx = torch.tensor(
+                    [SESSION_TO_IDX.get(s, 0) for s in sessions],
+                    dtype=torch.long, device=self.device
+                )
+
+                # Forward pass with logits for loss calculation
+                if is_session_gated:
+                    trend_probs, osc_probs, vol_probs, aux = self.model(
+                        sequence, trend_feat, osc_feat, vol_feat, session_idx, return_logits=True
+                    )
+                else:
+                    trend_probs, osc_probs, vol_probs, aux = self.model(
+                        sequence, trend_feat, osc_feat, vol_feat, return_logits=True
+                    )
+
+                # Use LOGITS for loss
+                trend_logits = aux["trend_logits"]
+                osc_logits = aux["osc_logits"]
+                vol_logits = aux["vol_logits"]
+
+                # Combined loss using logits (TwoHeadMLP/SessionGatedMLP: 1/2 + 1/2)
+                if is_two_head:
+                    loss = (
+                        self.criterion(trend_logits, labels) +
+                        self.criterion(osc_logits, labels)
+                    ) / 2
+                else:
+                    loss = (
+                        self.criterion(trend_logits, labels) +
+                        self.criterion(osc_logits, labels) +
+                        self.criterion(vol_logits, labels)
+                    ) / 3
+
+                total_loss += loss.item() * len(labels)
+
+                # Accuracy (TwoHeadMLP/SessionGatedMLP: 1/2 trend + 1/2 aux)
+                if is_two_head:
+                    ensemble_probs = (trend_probs + osc_probs) / 2
+                else:
+                    ensemble_probs = (trend_probs + osc_probs + vol_probs) / 3
+                predictions = ensemble_probs.argmax(dim=1)
+                hits = (predictions == labels).cpu()
+                correct += hits.sum().item()
+                total += len(labels)
+
+                # Per-session accuracy
+                for i, session in enumerate(sessions):
+                    session_stats[session]["total"] += 1
+                    if hits[i].item():
+                        session_stats[session]["correct"] += 1
+
+        # Build result
+        result = {
+            "overall": {
+                "loss": total_loss / total if total > 0 else 0,
+                "accuracy": correct / total if total > 0 else 0,
+                "total": total,
+                "correct": correct,
+            }
+        }
+
+        for session, stats in session_stats.items():
+            if stats["total"] > 0:
+                result[session] = {
+                    "accuracy": stats["correct"] / stats["total"],
+                    "total": stats["total"],
+                    "correct": stats["correct"],
+                }
+            else:
+                result[session] = {"accuracy": 0.0, "total": 0, "correct": 0}
+
+        return result
 
     def train_online_step(
         self,
@@ -590,18 +739,19 @@ class TFTTrainer:
         """
         self.model.train()
 
-        # Forward pass
-        trend_probs, osc_probs, vol_probs, _ = self.model(
+        # Forward pass with logits for loss
+        trend_probs, osc_probs, vol_probs, aux = self.model(
             sequence.to(self.device),
             trend_feat.to(self.device),
             osc_feat.to(self.device),
             vol_feat.to(self.device),
+            return_logits=True,
         )
 
-        # Get predictions
+        # Get predictions - consistent with offline: idx 1 = UP (return > 0)
         ensemble_probs = (trend_probs + osc_probs + vol_probs) / 3
         predicted_idx = ensemble_probs.argmax(dim=1).item()
-        predicted_direction = "UP" if predicted_idx == 0 else "DOWN"
+        predicted_direction = "UP" if predicted_idx == 1 else "DOWN"
         confidence = ensemble_probs[0, predicted_idx].item()
 
         # Calculate reward
@@ -609,18 +759,23 @@ class TFTTrainer:
             predicted_direction, actual_direction, return_pct, confidence
         )
 
-        # Convert actual direction to label
-        label = torch.tensor([0 if actual_direction == "UP" else 1], device=self.device)
+        # Convert actual direction to label - CONSISTENT with offline: 1 = UP, 0 = DOWN
+        label = torch.tensor([1 if actual_direction == "UP" else 0], device=self.device)
 
-        # Compute loss weighted by reward
+        # Get logits for loss
+        trend_logits = aux["trend_logits"]
+        osc_logits = aux["osc_logits"]
+        vol_logits = aux["vol_logits"]
+
+        # Compute loss weighted by reward using LOGITS
         # Positive reward = lower loss weight (correct predictions)
         # Negative reward = higher loss weight (wrong predictions)
         loss_weight = max(0.5, 1.0 - reward * 10)  # Clamp to reasonable range
 
         loss = loss_weight * (
-            self.criterion(trend_probs, label) +
-            self.criterion(osc_probs, label) +
-            self.criterion(vol_probs, label)
+            self.criterion(trend_logits, label) +
+            self.criterion(osc_logits, label) +
+            self.criterion(vol_logits, label)
         ) / 3
 
         # Backward pass

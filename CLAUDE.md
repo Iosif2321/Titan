@@ -64,11 +64,127 @@ Titan is a cryptocurrency price direction prediction system targeting 75%+ accur
 
 ---
 
-## NEW Architecture: Three-Head TFT Model (Sprint 23)
+## NEW Architecture: TwoHeadMLP Model (Sprint 23 - UPDATED 2025-01-01)
 
-**Заменяем 3 эвристические модели на 3 ML-модели с reinforcement learning.**
+**ThreeHeadTFT не учится → заменён на TwoHeadMLP.**
 
-### Общая архитектура
+### Sprint 23 Progress (2025-01-01)
+
+#### Исправленные баги
+
+| # | Баг | Файл | Строка | Фикс |
+|---|-----|------|--------|------|
+| 1 | `list(set())` — случайный порядок фич | `tft.py` | 55-57 | `sorted(set(...))` |
+| 2 | VSN dimension: GRN(input_dim, hidden_dim) выдавал 32 колонки вместо 33 | `tft.py` | 65 | `GRN(input_dim, input_dim)` |
+| 3 | ThreeHeadTFT не учится (55% с dropout=0) | `tft.py` | - | Создан **TwoHeadMLP** |
+| 4 | Feature нормализация отсутствовала | `trainer.py` | 272-295 | z-scores для цен, /100 для осцилляторов |
+| 5 | Target leakage: smoothed-3 видел val returns | `trainer.py` | - | Gap между train/val |
+
+#### Результаты тестов
+
+| Тест | Цель | Достигнуто |
+|------|------|------------|
+| Overfit (450 samples) | ≥90% | **90.22%** ✅ |
+| Val acc (7d, single target) | - | 52.93% |
+| Val acc (7d, smoothed-3, no leakage) | ≥54% | **54.07% ± 0.12%** ✅ |
+
+#### Stability Test (3 runs)
+
+| Run | Seed | Train Acc | Val Acc |
+|-----|------|-----------|---------|
+| 1 | 42 | 72.82% | 54.07% |
+| 2 | 43 | 71.15% | 53.92% |
+| 3 | 44 | 74.37% | 54.22% |
+| **Avg** | - | 72.78% | **54.07%** |
+| **Std** | - | 1.31% | **0.12%** |
+
+#### Per-Session Accuracy Breakdown (2025-01-01, UPDATED after P0 fix)
+
+| Session | Before P0 | After P0 | Change |
+|---------|-----------|----------|--------|
+| **EUROPE** | 55.49% ± 1.61% | **56.37% ± 0.81%** | **+0.88%** ✅ |
+| ASIA | 53.36% ± 0.31% | 52.36% ± 1.66% | -1.0% |
+| US | 52.15% ± 0.84% | 52.57% ± 0.73% | +0.42% |
+| **Overall** | 53.84% ± 0.58% | **53.86% ± 0.35%** | More stable |
+
+**P0 Fixes Applied:**
+1. **Unified feature pipeline** (`calculator.py`) - train/inference now identical
+2. **Streaming normalization** in FeatureStream (z-scores, /100)
+3. **Added stochastic_k/d** to FeatureStream
+4. **Fixed TwoHeadMLP weights** - 1/2 trend + 1/2 aux (was 1/3 + 2/3 aux)
+
+**Key Findings:**
+- **EUROPE improved +0.88%** and became more stable (std 0.81% vs 1.61%)
+- **US improved +0.42%**
+- **ASIA now worst session** (was US before fix)
+- **Gap: 4.01%** between best/worst sessions
+
+### Рабочая архитектура: TwoHeadMLP
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                      TWO-HEAD MLP MODEL                          │
+├─────────────────────────────────────────────────────────────────┤
+│  INPUTS:                                                         │
+│  ┌──────────────────────────────────────────────────────────────┐│
+│  │              Sequence [batch, seq_len, 33 features]          ││
+│  └──────────────────────────────────────────────────────────────┘│
+│                              │                                   │
+│                              ▼                                   │
+│  ┌──────────────────────────────────────────────────────────────┐│
+│  │              LSTM Encoder (hidden=64, layers=2)              ││
+│  └──────────────────────────────────────────────────────────────┘│
+│                              │                                   │
+│            ┌─────────────────┴─────────────────┐                │
+│            ▼                                   ▼                │
+│  ┌─────────────────────┐         ┌─────────────────────┐        │
+│  │    TREND HEAD       │         │     AUX HEAD        │        │
+│  │  (MLP: 64→32→2)     │         │  (MLP: 64→32→2)     │        │
+│  │  + trend_features   │         │  + osc + vol feats  │        │
+│  └─────────────────────┘         └─────────────────────┘        │
+│            │                                   │                │
+│            ▼                                   ▼                │
+│      [prob_up, prob_down]             [prob_up, prob_down]      │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Нормализация фич (КРИТИЧНО!)
+
+```python
+# trainer.py:272-295
+# Цены → z-scores
+df["close"] = (df["close"] - close_mean) / close_std
+df["ma_fast"] = (df["ma_fast"] - close_mean) / close_std
+df["ma_slow"] = (df["ma_slow"] - close_mean) / close_std
+df["ma_delta"] = df["ma_delta"] / close_std
+
+# Осцилляторы 0-100 → 0-1
+df["rsi"] = df["rsi"] / 100.0
+df["stochastic_k"] = df["stochastic_k"] / 100.0
+df["adx"] = df["adx"] / 100.0
+df["mfi"] = df["mfi"] / 100.0
+```
+
+### Target Smoothing
+
+```python
+# trainer.py:302-322
+# Smoothed target: sum of next 3 returns (reduces noise)
+for i in range(len(returns) - smoothing_window):
+    future_returns = returns[i + 1:i + 1 + smoothing_window]
+    labels[i] = 1.0 if np.sum(future_returns) > 0 else 0.0
+
+# ВАЖНО: Gap между train/val для избежания leakage!
+train_size = int(0.8 * total) - gap  # gap = smoothing_window
+```
+
+---
+
+## Legacy Architecture: Three-Head TFT Model (НЕ РАБОТАЕТ)
+
+**ВНИМАНИЕ: ThreeHeadTFT имеет архитектурные проблемы и не учится даже на overfit test.**
+
+### Архитектура (для справки)
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -974,43 +1090,62 @@ System plateaued at ~51-52% accuracy. Session analysis shows 4% gap:
 
 ---
 
-## Last Session Context (2025-12-30)
+## Last Session Context (2025-01-01)
+
+### Session Focus: Sprint 23 - TFT Model Training
 
 ### Completed
-- Sprint 14: LightGBM Classifier (31 features)
-- Sprint 15: Confidence Filtering
-- Sprint 16: New features (bb_position, vol_imbalance_20, adx, mfi)
-- Strategic planning (4 directions identified)
-- RL analysis (Thompson Sampling = Contextual Bandits)
+- Sprint 23: TwoHeadMLP model (working alternative to broken ThreeHeadTFT)
+- Fixed 5 critical bugs in TFT pipeline
+- Achieved 54.07% ± 0.12% validation accuracy (no leakage)
+- Passed overfit test: 90.22%
 
-### Latest Test Results (48h, 2025-12-30)
+### Bug Fixes Summary (2025-01-01)
+
+| # | Bug | File | Fix |
+|---|-----|------|-----|
+| 1 | `list(set())` random order | `tft.py:55-57` | `sorted(set(...))` |
+| 2 | VSN dimension mismatch | `tft.py:65` | `GRN(input_dim, input_dim)` |
+| 3 | ThreeHeadTFT can't learn | `tft.py` | Created TwoHeadMLP |
+| 4 | Missing normalization | `trainer.py:272-295` | z-scores, /100 scaling |
+| 5 | Target leakage | `trainer.py` | Gap between train/val |
+
+### Latest Test Results (7d data, 2025-01-01)
+
 ```
-Ensemble: 49.2% (1417/2879)
-ECE: 0.8%
-Sharpe: -22.4
-Direction Balance: 0.94 (balanced)
-p-value: 0.3 (not significant on 48h)
+TwoHeadMLP with Smoothed-3 Target (no leakage):
 
-Per-Model:
-- TRENDVIC: 48.8%, Balance 1.00
-- OSCILLATOR: 43.6%, Balance 0.98
-- VOLUMEMETRIX: 45.2%, Balance 0.97
-- ML_CLASSIFIER: 35.0%, Balance 0.65
+Stability Test (3 runs):
+- Run 1 (seed=42): Val=54.07%
+- Run 2 (seed=43): Val=53.92%
+- Run 3 (seed=44): Val=54.22%
+- Mean: 54.07% ± 0.12%
 
-Session Performance:
-- ASIA: 50.5% (960)
-- EUROPE: 46.5% (719) - worst
-- US: 49.8% (1200)
+Overfit Test:
+- Target: ≥90%
+- Achieved: 90.22%
+
+Train/Val Split:
+- Train: 8053 samples
+- Gap: 3 samples (for smoothed-3 target)
+- Val: 2014 samples
 ```
 
-### Strategic Direction Selected
-**Session Adapter** - per-session (ASIA/EUROPE/US) model configuration with:
-- Thompson Sampling for parameter selection
-- EMA weight updates with shrinkage
-- Temperature scaling for calibration
-- Decay mechanism (168h half-life)
-- Trust blocks (min 50 samples)
+### Key Files Modified
 
-### RL Analysis Conclusion
-Thompson Sampling in SessionAdapter = Contextual Bandits (a form of RL).
-Full RL (DQN/PPO) is overkill for single-step prediction problem.
+1. **titan/core/models/tft.py**:
+   - Added `TwoHeadMLP` class (LSTM + MLP heads)
+   - Fixed `list(set())` → `sorted(set())`
+   - Fixed VSN GRN dimensions
+
+2. **titan/core/training/trainer.py**:
+   - Added feature normalization (z-scores for prices, /100 for oscillators)
+   - Added target smoothing (sum of 3 returns)
+   - Exported TwoHeadMLP
+
+### Next Steps
+1. Add regularization to reduce overfitting (train 73% vs val 54%)
+2. Compare TwoHeadMLP with heuristics on same smoothed-3 target
+3. Test on 14-day data
+4. Add per-session accuracy breakdown (ASIA/EUROPE/US)
+5. Debug ThreeHeadTFT in separate branch (why doesn't it learn?)

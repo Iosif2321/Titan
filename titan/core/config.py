@@ -4,10 +4,11 @@ from titan.core.state_store import StateStore
 
 
 DEFAULT_CONFIG: Dict[str, Any] = {
-    # Sprint 22: Optuna-optimized parameters (53.32% accuracy - Trial 50/50)
-    "feature.fast_window": 3,  # Was 5 - faster response
-    "feature.slow_window": 15,  # Was 20 - optimized trend detection
-    "feature.rsi_window": 17,  # Was 14 - optimized RSI
+    # Sprint 23: Reset to match calculator.py for batch/stream parity
+    # These MUST match the hardcoded values in titan/core/features/calculator.py
+    "feature.fast_window": 5,  # calculator.py: rolling(5)
+    "feature.slow_window": 20,  # calculator.py: rolling(20)
+    "feature.rsi_window": 14,  # calculator.py: rolling(14)
     "feature.vol_window": 20,
     "feature.volume_window": 20,
     "model.flat_threshold": 0.566,  # Optuna: 0.5661

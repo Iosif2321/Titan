@@ -1,6 +1,6 @@
 """Session-based adaptation module.
 
-Sprint 17: Per-session (ASIA/EUROPE/US) model configuration using
+Sprint 17: Per-session (ASIA/EUROPE/OVERLAP/US) model configuration using
 Thompson Sampling (Contextual Bandits) for parameter selection.
 
 Key components:
@@ -9,6 +9,12 @@ Key components:
 - Thompson Sampling: Bayesian exploration for discrete parameters
 - Decay mechanism: 168h half-life for forgetting old data
 - Trust blocks: Minimum samples before trusting session stats
+
+Sessions (UTC) - aligned with patterns.py and trainer.py:
+- ASIA: 00:00 - 08:00 and 22:00 - 24:00
+- EUROPE: 08:00 - 13:00
+- OVERLAP: 13:00 - 17:00
+- US: 17:00 - 22:00
 """
 
 import json
@@ -24,11 +30,13 @@ import numpy as np
 from titan.core.config import ConfigStore
 
 
-# Trading sessions (UTC hours)
+# Trading sessions (UTC hours) - aligned with patterns.py and trainer.py
+# Note: ASIA wraps around (00-08 and 22-24), handled specially in get_session()
 SESSIONS = {
-    "ASIA": (0, 8),      # 00:00 - 08:00 UTC
-    "EUROPE": (8, 16),   # 08:00 - 16:00 UTC
-    "US": (16, 24),      # 16:00 - 24:00 UTC
+    "ASIA": [(0, 8), (22, 24)],   # 00:00-08:00 and 22:00-24:00 UTC
+    "EUROPE": [(8, 13)],          # 08:00-13:00 UTC
+    "OVERLAP": [(13, 17)],        # 13:00-17:00 UTC (London + New York)
+    "US": [(17, 22)],             # 17:00-22:00 UTC
 }
 
 # Parameter options for Thompson Sampling
@@ -578,20 +586,31 @@ class SessionAdapter:
     def get_session(self, ts: int) -> str:
         """Determine trading session from timestamp.
 
+        Aligned with trainer.py and patterns.py:
+        - ASIA: 00:00-08:00 and 22:00-24:00 UTC
+        - EUROPE: 08:00-13:00 UTC
+        - OVERLAP: 13:00-17:00 UTC (London + New York)
+        - US: 17:00-22:00 UTC
+
         Args:
             ts: Unix timestamp
 
         Returns:
-            Session name: 'ASIA', 'EUROPE', or 'US'
+            Session name: 'ASIA', 'EUROPE', 'OVERLAP', or 'US'
         """
         dt = datetime.fromtimestamp(ts, tz=timezone.utc)
         hour = dt.hour
 
-        for session, (start, end) in SESSIONS.items():
-            if start <= hour < end:
-                return session
-
-        return "US"  # Default fallback
+        if 0 <= hour < 8:
+            return "ASIA"
+        elif 8 <= hour < 13:
+            return "EUROPE"
+        elif 13 <= hour < 17:
+            return "OVERLAP"
+        elif 17 <= hour < 22:
+            return "US"
+        else:  # 22-23
+            return "ASIA"
 
     def get_weights(
         self,

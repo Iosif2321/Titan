@@ -4,16 +4,22 @@ Titan Cleanup Script
 
 Removes:
 - runs/ directory (test results)
+- checkpoints/ and checkpoints_*/ (model checkpoints)
+- data/ directory (training CSV files)
 - titan.db and related files (pattern database)
+- titan_session.db (session adapter state)
 - context.db and related files (memory keeper)
-- __pycache__ directories
-- .pyc files
+- test_*.py files in root (temporary test scripts)
+- __pycache__ directories and .pyc files
+- logs/ directory and *.log files
 
 Usage:
-    python cleanup.py           # Interactive mode (asks what to clean)
-    python cleanup.py --force   # Force delete everything without confirmation
-    python cleanup.py --dry-run # Show what would be deleted
-    python cleanup.py --all     # Clean everything (with confirmation)
+    python cleanup.py                 # Interactive mode (asks what to clean)
+    python cleanup.py --force         # Force delete everything without confirmation
+    python cleanup.py --dry-run       # Show what would be deleted
+    python cleanup.py --all           # Clean everything (with confirmation)
+    python cleanup.py --checkpoints   # Clean only model checkpoints
+    python cleanup.py --data          # Clean only training data
 """
 
 import os
@@ -31,11 +37,30 @@ CLEANUP_CATEGORIES = {
         "dirs": ["runs"],
         "files": [],
     },
+    "checkpoints": {
+        "name": "Model checkpoints",
+        "description": "checkpoints/ and checkpoints_*/ directories with .pt files",
+        "dirs": ["checkpoints"],
+        "files": [],
+        "glob_dirs": ["checkpoints_*"],  # Pattern for checkpoint dirs
+    },
+    "data": {
+        "name": "Training data",
+        "description": "data/ directory with downloaded CSV files",
+        "dirs": ["data"],
+        "files": [],
+    },
     "patterns": {
         "name": "Pattern database",
         "description": "titan.db and related files",
         "dirs": [],
         "files": ["titan.db", "titan.db-shm", "titan.db-wal", "titan.db-journal"],
+    },
+    "session": {
+        "name": "Session database",
+        "description": "titan_session.db (SessionAdapter state)",
+        "dirs": [],
+        "files": ["titan_session.db", "titan_session.db-shm", "titan_session.db-wal", "titan_session.db-journal"],
     },
     "context": {
         "name": "Context database",
@@ -43,12 +68,26 @@ CLEANUP_CATEGORIES = {
         "dirs": [],
         "files": ["context.db", "context.db-shm", "context.db-wal", "context.db-journal"],
     },
+    "test_scripts": {
+        "name": "Test scripts",
+        "description": "test_*.py files in root (not tests/ folder)",
+        "dirs": [],
+        "files": [],
+        "root_glob": ["test_*.py"],  # Only in root, not recursive
+    },
     "cache": {
         "name": "Python cache",
         "description": "__pycache__ directories and .pyc files",
         "dirs": ["__pycache__"],
         "files": [],
         "patterns": ["*.pyc", "*.pyo"],
+    },
+    "logs": {
+        "name": "Log files",
+        "description": "*.log files and logs/ directory",
+        "dirs": ["logs"],
+        "files": [],
+        "patterns": ["*.log"],
     },
 }
 
@@ -100,6 +139,14 @@ def find_items_by_category(base_path: Path, categories: list) -> tuple:
                     dirs_found.append((dir_path, size))
                     total_size += size
 
+        # Check glob directories (e.g., checkpoints_*)
+        for glob_pattern in cat.get("glob_dirs", []):
+            for match in base_path.glob(glob_pattern):
+                if match.is_dir() and match not in [d[0] for d in dirs_found]:
+                    size = get_dir_size(match)
+                    dirs_found.append((match, size))
+                    total_size += size
+
         # Check files
         for file_name in cat.get("files", []):
             file_path = base_path / file_name
@@ -107,6 +154,14 @@ def find_items_by_category(base_path: Path, categories: list) -> tuple:
                 size = file_path.stat().st_size
                 if file_path not in [f[0] for f in files_found]:
                     files_found.append((file_path, size))
+                    total_size += size
+
+        # Check root-only glob patterns (e.g., test_*.py in root only)
+        for glob_pattern in cat.get("root_glob", []):
+            for match in base_path.glob(glob_pattern):
+                if match.is_file() and match not in [f[0] for f in files_found]:
+                    size = match.stat().st_size
+                    files_found.append((match, size))
                     total_size += size
 
         # Check patterns (recursive)
@@ -253,9 +308,14 @@ Examples:
     python cleanup.py --force      # Delete everything without confirmation
     python cleanup.py --dry-run    # Show what would be deleted
     python cleanup.py --runs       # Clean only test runs
-    python cleanup.py --patterns   # Clean only pattern database
-    python cleanup.py --context    # Clean only context database
-    python cleanup.py --cache      # Clean only Python cache
+    python cleanup.py --checkpoints # Clean model checkpoints (checkpoints/, checkpoints_*/)
+    python cleanup.py --data       # Clean training data (data/)
+    python cleanup.py --patterns   # Clean pattern database (titan.db)
+    python cleanup.py --session    # Clean session database (titan_session.db)
+    python cleanup.py --context    # Clean context database (context.db)
+    python cleanup.py --test-scripts # Clean test_*.py files in root
+    python cleanup.py --cache      # Clean Python cache (__pycache__/)
+    python cleanup.py --logs       # Clean log files
         """
     )
     parser.add_argument(
@@ -279,9 +339,24 @@ Examples:
         help="Clean runs/ directory"
     )
     parser.add_argument(
+        "--checkpoints",
+        action="store_true",
+        help="Clean checkpoints/ and checkpoints_*/ directories"
+    )
+    parser.add_argument(
+        "--data",
+        action="store_true",
+        help="Clean data/ directory with training CSV files"
+    )
+    parser.add_argument(
         "--patterns",
         action="store_true",
         help="Clean titan.db pattern database"
+    )
+    parser.add_argument(
+        "--session",
+        action="store_true",
+        help="Clean titan_session.db session database"
     )
     parser.add_argument(
         "--context",
@@ -289,9 +364,19 @@ Examples:
         help="Clean context.db memory keeper"
     )
     parser.add_argument(
+        "--test-scripts",
+        action="store_true",
+        help="Clean test_*.py files in root directory"
+    )
+    parser.add_argument(
         "--cache",
         action="store_true",
         help="Clean __pycache__ and .pyc files"
+    )
+    parser.add_argument(
+        "--logs",
+        action="store_true",
+        help="Clean logs/ directory and *.log files"
     )
     parser.add_argument(
         "--path", "-p",
@@ -318,12 +403,22 @@ Examples:
     # Check for specific category flags
     if args.runs:
         selected_categories.append("runs")
+    if args.checkpoints:
+        selected_categories.append("checkpoints")
+    if args.data:
+        selected_categories.append("data")
     if args.patterns:
         selected_categories.append("patterns")
+    if args.session:
+        selected_categories.append("session")
     if args.context:
         selected_categories.append("context")
+    if args.test_scripts:
+        selected_categories.append("test_scripts")
     if args.cache:
         selected_categories.append("cache")
+    if args.logs:
+        selected_categories.append("logs")
 
     # If --all or --force, clean everything
     if args.all or args.force:

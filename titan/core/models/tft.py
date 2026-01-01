@@ -13,9 +13,16 @@ Memory estimation: ~3.5GB for batch_size=32
 """
 from typing import Dict, List, Optional, Tuple
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
+try:
+    import torch
+    import torch.nn as nn
+    import torch.nn.functional as F
+    HAS_TORCH = True
+except ImportError:
+    HAS_TORCH = False
+    torch = None
+    nn = None
+    F = None
 
 from titan.core.config import ConfigStore
 from titan.core.models.base import BaseModel
@@ -45,8 +52,9 @@ VOLUME_FEATURES = [
 # Common features used by all heads
 COMMON_FEATURES = ["close", "return_1", "volatility_z"]
 
-# All features combined
-ALL_FEATURES = list(set(TREND_FEATURES + OSCILLATOR_FEATURES + VOLUME_FEATURES + COMMON_FEATURES))
+# All features combined - MUST use sorted() for consistent ordering across Python sessions!
+# Using list(set(...)) would cause random feature order on each Python restart, breaking model loading
+ALL_FEATURES = sorted(set(TREND_FEATURES + OSCILLATOR_FEATURES + VOLUME_FEATURES + COMMON_FEATURES))
 
 
 class VariableSelectionNetwork(nn.Module):
@@ -54,7 +62,9 @@ class VariableSelectionNetwork(nn.Module):
 
     def __init__(self, input_dim: int, hidden_dim: int, dropout: float = 0.1):
         super().__init__()
-        self.flattened_grn = GatedResidualNetwork(input_dim, hidden_dim, dropout)
+        # NOTE: Weight GRN must output input_dim (for variable weights), not hidden_dim!
+        # Bug fix: was GRN(input_dim, hidden_dim) which caused dimension mismatch
+        self.flattened_grn = GatedResidualNetwork(input_dim, input_dim, dropout)
         self.variable_grns = nn.ModuleList([
             GatedResidualNetwork(1, hidden_dim, dropout) for _ in range(input_dim)
         ])
@@ -262,14 +272,17 @@ class PredictionHead(nn.Module):
         self,
         encoder_out: torch.Tensor,
         head_features: torch.Tensor,
+        return_logits: bool = False,
     ) -> torch.Tensor:
         """
         Args:
             encoder_out: [batch, hidden_dim] - shared encoder output
             head_features: [batch, feature_dim] - head-specific features
+            return_logits: If True, return (logits, probs), else just probs
 
         Returns:
             probs: [batch, 2] - prob_up, prob_down (softmax)
+            or (logits, probs) if return_logits=True
         """
         # Embed head features
         feat_embed = F.relu(self.feature_embed(head_features))
@@ -281,10 +294,12 @@ class PredictionHead(nn.Module):
         combined = self.layer_norm2(F.relu(self.fc2(combined)))
         combined = self.dropout(combined)
 
-        # Output probabilities
+        # Output logits and probabilities
         logits = self.output(combined)
         probs = F.softmax(logits, dim=-1)
 
+        if return_logits:
+            return logits, probs
         return probs
 
 
@@ -300,7 +315,7 @@ class ThreeHeadTFT(nn.Module):
     def __init__(
         self,
         config: ConfigStore,
-        input_dim: int = 30,
+        input_dim: int = None,  # Defaults to len(ALL_FEATURES) = 33
         hidden_dim: int = 64,
         num_heads: int = 4,
         num_lstm_layers: int = 2,
@@ -310,6 +325,10 @@ class ThreeHeadTFT(nn.Module):
         super().__init__()
         self.config = config
         self.hidden_dim = hidden_dim
+
+        # Default input_dim to number of ALL_FEATURES
+        if input_dim is None:
+            input_dim = len(ALL_FEATURES)
 
         # Override from config if available
         hidden_dim = int(config.get("tft.hidden_dim", hidden_dim))
@@ -359,6 +378,7 @@ class ThreeHeadTFT(nn.Module):
         pattern_aggregates: Optional[torch.Tensor] = None,
         pattern_events: Optional[torch.Tensor] = None,
         mask: Optional[torch.Tensor] = None,
+        return_logits: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:
         """
         Forward pass through the three-head TFT model.
@@ -371,12 +391,13 @@ class ThreeHeadTFT(nn.Module):
             pattern_aggregates: [batch, 10] - pattern aggregate stats
             pattern_events: [batch, n_events, 6] - historical pattern events
             mask: Optional attention mask
+            return_logits: If True, aux contains logits for training
 
         Returns:
             trend_probs: [batch, 2]
             oscillator_probs: [batch, 2]
             volume_probs: [batch, 2]
-            aux: Dict with variable weights and attention info
+            aux: Dict with variable weights, attention info, and optionally logits
         """
         # Shared encoding
         encoded, var_weights = self.encoder(sequence, mask)
@@ -390,16 +411,372 @@ class ThreeHeadTFT(nn.Module):
         encoded = self.pattern_attention(encoded, pattern_events)
 
         # Head predictions
-        trend_probs = self.trend_head(encoded, trend_features)
-        oscillator_probs = self.oscillator_head(encoded, oscillator_features)
-        volume_probs = self.volume_head(encoded, volume_features)
+        if return_logits:
+            trend_logits, trend_probs = self.trend_head(encoded, trend_features, return_logits=True)
+            osc_logits, osc_probs = self.oscillator_head(encoded, oscillator_features, return_logits=True)
+            vol_logits, vol_probs = self.volume_head(encoded, volume_features, return_logits=True)
+            aux = {
+                "var_weights": var_weights,
+                "encoded": encoded,
+                "trend_logits": trend_logits,
+                "osc_logits": osc_logits,
+                "vol_logits": vol_logits,
+            }
+        else:
+            trend_probs = self.trend_head(encoded, trend_features)
+            osc_probs = self.oscillator_head(encoded, oscillator_features)
+            vol_probs = self.volume_head(encoded, volume_features)
+            aux = {
+                "var_weights": var_weights,
+                "encoded": encoded,
+            }
 
-        aux = {
-            "var_weights": var_weights,
-            "encoded": encoded,
-        }
+        return trend_probs, osc_probs, vol_probs, aux
 
-        return trend_probs, oscillator_probs, volume_probs, aux
+
+class TwoHeadMLP(nn.Module):
+    """Simple but working MLP model for direction prediction.
+
+    Replaces the broken TFT architecture with a proven working model.
+    Uses LSTM for sequence encoding + MLP heads.
+
+    Tested: Achieves 90%+ on overfit test (vs TFT which cannot learn).
+    """
+
+    def __init__(
+        self,
+        config: ConfigStore,
+        input_dim: int,
+        hidden_dim: int = 64,
+        num_lstm_layers: int = 1,
+        dropout: float = 0.1,
+    ):
+        super().__init__()
+        self._config = config
+        self.hidden_dim = hidden_dim
+
+        # Simple LSTM encoder
+        self.lstm = nn.LSTM(
+            input_size=input_dim,
+            hidden_size=hidden_dim,
+            num_layers=num_lstm_layers,
+            batch_first=True,
+            dropout=dropout if num_lstm_layers > 1 else 0,
+        )
+
+        # Two prediction heads (trend + volume/oscillator combined)
+        self.trend_head = nn.Sequential(
+            nn.Linear(hidden_dim + len(TREND_FEATURES), hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.ReLU(),
+            nn.Linear(hidden_dim // 2, 2),  # logits
+        )
+
+        self.aux_head = nn.Sequential(
+            nn.Linear(hidden_dim + len(OSCILLATOR_FEATURES) + len(VOLUME_FEATURES), hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.ReLU(),
+            nn.Linear(hidden_dim // 2, 2),  # logits
+        )
+
+        self._device = torch.device("cpu")
+
+    def to(self, device):
+        self._device = device
+        return super().to(device)
+
+    def forward(
+        self,
+        sequence: torch.Tensor,
+        trend_features: torch.Tensor,
+        oscillator_features: torch.Tensor,
+        volume_features: torch.Tensor,
+        pattern_aggregates: Optional[torch.Tensor] = None,
+        pattern_events: Optional[torch.Tensor] = None,
+        mask: Optional[torch.Tensor] = None,
+        return_logits: bool = False,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:
+        """
+        Forward pass - compatible with ThreeHeadTFT interface.
+
+        Returns same structure: trend_probs, osc_probs, vol_probs, aux
+        (osc_probs and vol_probs are same since we use combined aux_head)
+        """
+        # LSTM encoding - use last hidden state
+        lstm_out, (h_n, c_n) = self.lstm(sequence)
+        encoded = h_n[-1]  # [batch, hidden_dim] - last layer hidden state
+
+        # Trend head
+        trend_input = torch.cat([encoded, trend_features], dim=-1)
+        trend_logits = self.trend_head(trend_input)
+        trend_probs = F.softmax(trend_logits, dim=-1)
+
+        # Aux head (combines oscillator + volume)
+        aux_input = torch.cat([encoded, oscillator_features, volume_features], dim=-1)
+        aux_logits = self.aux_head(aux_input)
+        aux_probs = F.softmax(aux_logits, dim=-1)
+
+        # Return same format as ThreeHeadTFT for compatibility
+        aux_dict = {"encoded": encoded}
+
+        if return_logits:
+            aux_dict["trend_logits"] = trend_logits
+            aux_dict["osc_logits"] = aux_logits  # same as vol_logits
+            aux_dict["vol_logits"] = aux_logits
+
+        # osc_probs and vol_probs are same (two-head model)
+        return trend_probs, aux_probs, aux_probs, aux_dict
+
+
+# Session indices for session-aware models (4 sessions aligned with patterns.py)
+SESSION_TO_IDX = {"ASIA": 0, "EUROPE": 1, "OVERLAP": 2, "US": 3}
+IDX_TO_SESSION = {0: "ASIA", 1: "EUROPE", 2: "OVERLAP", 3: "US"}
+
+
+class SessionEmbeddingMLP(nn.Module):
+    """Session-aware MLP with embedding (P2.5).
+
+    Uses shared LSTM encoder + shared heads, but adds session embedding
+    to provide session context while maintaining shared learning.
+
+    Advantages over SessionGatedMLP:
+    - Shared learning across all sessions (more data per head)
+    - Fewer parameters (single set of heads + small embedding)
+    - Session context without separate decision boundaries
+
+    Goal: Overall >=54%, Worst >=53%, Gap <=2.5%
+    """
+
+    def __init__(
+        self,
+        config: ConfigStore,
+        input_dim: int,
+        hidden_dim: int = 64,
+        num_lstm_layers: int = 1,
+        dropout: float = 0.1,
+        session_embed_dim: int = 8,  # Small embedding for session context
+    ):
+        super().__init__()
+        self._config = config
+        self.hidden_dim = hidden_dim
+        self.session_embed_dim = session_embed_dim
+
+        # Session embedding: 4 sessions -> embed_dim (ASIA, EUROPE, OVERLAP, US)
+        self.session_embedding = nn.Embedding(4, session_embed_dim)
+
+        # Shared LSTM encoder
+        self.lstm = nn.LSTM(
+            input_size=input_dim,
+            hidden_size=hidden_dim,
+            num_layers=num_lstm_layers,
+            batch_first=True,
+            dropout=dropout if num_lstm_layers > 1 else 0,
+        )
+
+        # Shared prediction heads (with session embedding concatenated)
+        # Input: hidden_dim + session_embed_dim + feature_dim
+        self.trend_head = nn.Sequential(
+            nn.Linear(hidden_dim + session_embed_dim + len(TREND_FEATURES), hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.ReLU(),
+            nn.Linear(hidden_dim // 2, 2),
+        )
+
+        self.aux_head = nn.Sequential(
+            nn.Linear(hidden_dim + session_embed_dim + len(OSCILLATOR_FEATURES) + len(VOLUME_FEATURES), hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.ReLU(),
+            nn.Linear(hidden_dim // 2, 2),
+        )
+
+        self._device = torch.device("cpu")
+
+    def to(self, device):
+        self._device = device
+        return super().to(device)
+
+    def forward(
+        self,
+        sequence: torch.Tensor,
+        trend_features: torch.Tensor,
+        oscillator_features: torch.Tensor,
+        volume_features: torch.Tensor,
+        session_idx: torch.Tensor,  # [batch] - session indices (0=ASIA, 1=EUROPE, 2=US)
+        pattern_aggregates: Optional[torch.Tensor] = None,
+        pattern_events: Optional[torch.Tensor] = None,
+        mask: Optional[torch.Tensor] = None,
+        return_logits: bool = False,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:
+        """
+        Forward pass with session embedding.
+
+        Args:
+            sequence: [batch, seq_len, input_dim]
+            trend_features: [batch, n_trend]
+            oscillator_features: [batch, n_osc]
+            volume_features: [batch, n_vol]
+            session_idx: [batch] - session indices (0=ASIA, 1=EUROPE, 2=US)
+
+        Returns same structure: trend_probs, osc_probs, vol_probs, aux
+        """
+        # Get session embedding
+        session_emb = self.session_embedding(session_idx)  # [batch, session_embed_dim]
+
+        # Shared LSTM encoding
+        lstm_out, (h_n, c_n) = self.lstm(sequence)
+        encoded = h_n[-1]  # [batch, hidden_dim]
+
+        # Concatenate encoded + session_emb + features for each head
+        trend_input = torch.cat([encoded, session_emb, trend_features], dim=-1)
+        aux_input = torch.cat([encoded, session_emb, oscillator_features, volume_features], dim=-1)
+
+        # Shared heads with session context
+        trend_logits = self.trend_head(trend_input)
+        aux_logits = self.aux_head(aux_input)
+
+        # Convert to probabilities
+        trend_probs = F.softmax(trend_logits, dim=-1)
+        aux_probs = F.softmax(aux_logits, dim=-1)
+
+        # Return same format as TwoHeadMLP
+        aux_dict = {"encoded": encoded, "session_idx": session_idx, "session_emb": session_emb}
+
+        if return_logits:
+            aux_dict["trend_logits"] = trend_logits
+            aux_dict["osc_logits"] = aux_logits
+            aux_dict["vol_logits"] = aux_logits
+
+        return trend_probs, aux_probs, aux_probs, aux_dict
+
+
+class SessionGatedMLP(nn.Module):
+    """Session-gated MLP model for direction prediction (P2).
+
+    Uses shared LSTM encoder + 3 session-specific prediction heads.
+    Each session (ASIA, EUROPE, US) has its own decision boundary.
+
+    Goal: Reduce session gap to ≤2.5% while maintaining ≥54% overall accuracy.
+    """
+
+    def __init__(
+        self,
+        config: ConfigStore,
+        input_dim: int,
+        hidden_dim: int = 64,
+        num_lstm_layers: int = 1,
+        dropout: float = 0.1,
+    ):
+        super().__init__()
+        self._config = config
+        self.hidden_dim = hidden_dim
+        self.num_sessions = 4  # ASIA, EUROPE, OVERLAP, US
+
+        # Shared LSTM encoder
+        self.lstm = nn.LSTM(
+            input_size=input_dim,
+            hidden_size=hidden_dim,
+            num_layers=num_lstm_layers,
+            batch_first=True,
+            dropout=dropout if num_lstm_layers > 1 else 0,
+        )
+
+        # Session-specific heads (4 sets: ASIA, EUROPE, OVERLAP, US)
+        self.trend_heads = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(hidden_dim + len(TREND_FEATURES), hidden_dim),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(hidden_dim, hidden_dim // 2),
+                nn.ReLU(),
+                nn.Linear(hidden_dim // 2, 2),
+            )
+            for _ in range(self.num_sessions)
+        ])
+
+        self.aux_heads = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(hidden_dim + len(OSCILLATOR_FEATURES) + len(VOLUME_FEATURES), hidden_dim),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(hidden_dim, hidden_dim // 2),
+                nn.ReLU(),
+                nn.Linear(hidden_dim // 2, 2),
+            )
+            for _ in range(self.num_sessions)
+        ])
+
+        self._device = torch.device("cpu")
+
+    def to(self, device):
+        self._device = device
+        return super().to(device)
+
+    def forward(
+        self,
+        sequence: torch.Tensor,
+        trend_features: torch.Tensor,
+        oscillator_features: torch.Tensor,
+        volume_features: torch.Tensor,
+        session_idx: torch.Tensor,  # [batch] - session indices (0=ASIA, 1=EUROPE, 2=US)
+        pattern_aggregates: Optional[torch.Tensor] = None,
+        pattern_events: Optional[torch.Tensor] = None,
+        mask: Optional[torch.Tensor] = None,
+        return_logits: bool = False,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:
+        """
+        Forward pass with session gating.
+
+        Args:
+            sequence: [batch, seq_len, input_dim]
+            trend_features: [batch, n_trend]
+            oscillator_features: [batch, n_osc]
+            volume_features: [batch, n_vol]
+            session_idx: [batch] - session indices (0=ASIA, 1=EUROPE, 2=US)
+
+        Returns same structure: trend_probs, osc_probs, vol_probs, aux
+        """
+        batch_size = sequence.shape[0]
+
+        # Shared LSTM encoding
+        lstm_out, (h_n, c_n) = self.lstm(sequence)
+        encoded = h_n[-1]  # [batch, hidden_dim]
+
+        # Prepare inputs for heads
+        trend_input = torch.cat([encoded, trend_features], dim=-1)
+        aux_input = torch.cat([encoded, oscillator_features, volume_features], dim=-1)
+
+        # Initialize outputs
+        trend_logits = torch.zeros(batch_size, 2, device=sequence.device)
+        aux_logits = torch.zeros(batch_size, 2, device=sequence.device)
+
+        # Route each sample to its session-specific head
+        for sess_id in range(self.num_sessions):
+            mask = (session_idx == sess_id)
+            if mask.any():
+                trend_logits[mask] = self.trend_heads[sess_id](trend_input[mask])
+                aux_logits[mask] = self.aux_heads[sess_id](aux_input[mask])
+
+        # Convert to probabilities
+        trend_probs = F.softmax(trend_logits, dim=-1)
+        aux_probs = F.softmax(aux_logits, dim=-1)
+
+        # Return same format as TwoHeadMLP
+        aux_dict = {"encoded": encoded, "session_idx": session_idx}
+
+        if return_logits:
+            aux_dict["trend_logits"] = trend_logits
+            aux_dict["osc_logits"] = aux_logits
+            aux_dict["vol_logits"] = aux_logits
+
+        return trend_probs, aux_probs, aux_probs, aux_dict
 
 
 class TFTModelWrapper(BaseModel):
@@ -618,3 +995,171 @@ def create_tft_models(
     volume_model = TFTModelWrapper(config, "VOLUMEML", tft_model, feature_buffer)
 
     return trend_model, oscillator_model, volume_model, tft_model
+
+
+class TwoHeadMLPWrapper(BaseModel):
+    """Wrapper to use TwoHeadMLP with existing Titan interface.
+
+    Implements BaseModel interface for compatibility with Ensemble.
+    TwoHeadMLP has only 2 heads (trend + aux), so we expose both
+    as separate models for the ensemble.
+    """
+
+    def __init__(
+        self,
+        config: ConfigStore,
+        head_name: str,
+        model: TwoHeadMLP,
+        feature_buffer: "FeatureBuffer",
+        session_idx: int = 0,
+    ):
+        self.name = head_name
+        self._config = config
+        self._model = model
+        self._feature_buffer = feature_buffer
+        self._head_name = head_name
+        self._session_idx = session_idx  # Default session (0=ASIA)
+
+    def set_session(self, session: str) -> None:
+        """Set current session for session-aware models."""
+        self._session_idx = SESSION_TO_IDX.get(session, 0)
+
+    def predict(
+        self,
+        features: Dict[str, float],
+        pattern_context: Optional["PatternContext"] = None,
+    ) -> "ModelOutput":
+        """Make prediction using TwoHeadMLP model.
+
+        Args:
+            features: Current market features
+            pattern_context: Pattern context (unused for TwoHeadMLP)
+
+        Returns:
+            ModelOutput with probabilities
+        """
+        from titan.core.types import ModelOutput
+
+        # Add features to buffer and get sequence
+        self._feature_buffer.add(features)
+
+        # Check if we have enough history
+        if not self._feature_buffer.is_ready():
+            return ModelOutput(
+                model_name=self.name,
+                prob_up=0.5,
+                prob_down=0.5,
+                state={"buffer_filling": True},
+                metrics={},
+            )
+
+        # Get tensors from buffer
+        with torch.no_grad():
+            sequence, trend_feat, osc_feat, vol_feat = self._feature_buffer.get_tensors()
+
+            # Create session index tensor
+            session_idx_tensor = torch.tensor(
+                [self._session_idx], dtype=torch.long, device=sequence.device
+            )
+
+            # Forward pass
+            if isinstance(self._model, (SessionGatedMLP, SessionEmbeddingMLP)):
+                trend_probs, aux_probs, _, aux = self._model(
+                    sequence, trend_feat, osc_feat, vol_feat, session_idx_tensor
+                )
+            else:
+                trend_probs, aux_probs, _, aux = self._model(
+                    sequence, trend_feat, osc_feat, vol_feat
+                )
+
+            # Get probabilities for this head
+            if self._head_name == "TRENDML":
+                probs = trend_probs[0]  # [batch=1, 2] -> [2]
+            else:  # AUXML
+                probs = aux_probs[0]
+
+            prob_up = probs[1].item()
+            prob_down = probs[0].item()
+
+        return ModelOutput(
+            model_name=self.name,
+            prob_up=prob_up,
+            prob_down=prob_down,
+            state={"head": self._head_name, "session_idx": self._session_idx},
+            metrics={"confidence": max(prob_up, prob_down)},
+        )
+
+
+def create_two_head_models(
+    config: ConfigStore,
+    device: Optional[torch.device] = None,
+    model_class: str = "TwoHeadMLP",
+    checkpoint_path: Optional[str] = None,
+) -> Tuple["TwoHeadMLPWrapper", "TwoHeadMLPWrapper", "TwoHeadMLP"]:
+    """Create two model wrappers for TwoHeadMLP.
+
+    Args:
+        config: Configuration store
+        device: Device to use (auto-detect if None)
+        model_class: Model class to use: "TwoHeadMLP", "SessionGatedMLP", or "SessionEmbeddingMLP"
+        checkpoint_path: Optional path to load model checkpoint
+
+    Returns:
+        trend_model: TrendML model wrapper
+        aux_model: AuxML model wrapper (combines oscillator + volume)
+        raw_model: Underlying TwoHeadMLP model (for reference)
+    """
+    import os
+
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # Create model based on class selection
+    hidden_dim = int(config.get("tft.hidden_dim", 64))
+    num_lstm_layers = int(config.get("tft.num_lstm_layers", 1))
+    # Gemini recommendation: High dropout (0.4) to reduce overfitting on crypto data
+    dropout = float(config.get("tft.dropout", 0.4))
+
+    if model_class == "SessionGatedMLP":
+        raw_model = SessionGatedMLP(
+            config=config,
+            input_dim=len(ALL_FEATURES),
+            hidden_dim=hidden_dim,
+            num_lstm_layers=num_lstm_layers,
+            dropout=dropout,
+        ).to(device)
+    elif model_class == "SessionEmbeddingMLP":
+        raw_model = SessionEmbeddingMLP(
+            config=config,
+            input_dim=len(ALL_FEATURES),
+            hidden_dim=hidden_dim,
+            num_lstm_layers=num_lstm_layers,
+            dropout=dropout,
+            session_embed_dim=int(config.get("tft.session_embed_dim", 8)),
+        ).to(device)
+    else:  # Default: TwoHeadMLP
+        raw_model = TwoHeadMLP(
+            config=config,
+            input_dim=len(ALL_FEATURES),
+            hidden_dim=hidden_dim,
+            num_lstm_layers=num_lstm_layers,
+            dropout=dropout,
+        ).to(device)
+
+    # Load checkpoint if provided
+    if checkpoint_path and os.path.exists(checkpoint_path):
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+        raw_model.load_state_dict(checkpoint["model_state_dict"])
+        print(f"[TwoHeadMLP] Loaded checkpoint: {checkpoint_path}")
+
+    raw_model.eval()
+
+    # Create shared feature buffer
+    seq_len = int(config.get("tft.seq_len", 100))
+    feature_buffer = FeatureBuffer(seq_len=seq_len, device=device)
+
+    # Create wrappers for each head
+    trend_model = TwoHeadMLPWrapper(config, "TRENDML", raw_model, feature_buffer)
+    aux_model = TwoHeadMLPWrapper(config, "AUXML", raw_model, feature_buffer)
+
+    return trend_model, aux_model, raw_model

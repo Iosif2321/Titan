@@ -58,6 +58,22 @@ def main() -> None:
         action="store_true",
         help="Disable automatic weight tuning",
     )
+    backtest.add_argument(
+        "--use-two-head",
+        action="store_true",
+        help="Use TwoHeadMLP model instead of heuristic models",
+    )
+    backtest.add_argument(
+        "--two-head-checkpoint",
+        default=None,
+        help="Path to TwoHeadMLP checkpoint file",
+    )
+    backtest.add_argument(
+        "--two-head-model-class",
+        default="TwoHeadMLP",
+        choices=["TwoHeadMLP", "SessionEmbeddingMLP", "SessionGatedMLP"],
+        help="TwoHeadMLP model class variant",
+    )
 
     live = sub.add_parser("live", help="Run live websocket test")
     live.add_argument("--symbol", default="BTCUSDT", help="Market symbol")
@@ -86,6 +102,22 @@ def main() -> None:
         action="append",
         default=[],
         help="Override config value, format: key=value",
+    )
+    live.add_argument(
+        "--use-two-head",
+        action="store_true",
+        help="Use TwoHeadMLP model instead of heuristic models",
+    )
+    live.add_argument(
+        "--two-head-checkpoint",
+        default=None,
+        help="Path to TwoHeadMLP checkpoint file",
+    )
+    live.add_argument(
+        "--two-head-model-class",
+        default="TwoHeadMLP",
+        choices=["TwoHeadMLP", "SessionEmbeddingMLP", "SessionGatedMLP"],
+        help="TwoHeadMLP model class variant",
     )
 
     history = sub.add_parser("history", help="Download historical data and backtest")
@@ -117,6 +149,22 @@ def main() -> None:
         "--store-candles",
         action="store_true",
         help="Store downloaded candles in SQLite",
+    )
+    history.add_argument(
+        "--use-two-head",
+        action="store_true",
+        help="Use TwoHeadMLP model instead of heuristic models",
+    )
+    history.add_argument(
+        "--two-head-checkpoint",
+        default=None,
+        help="Path to TwoHeadMLP checkpoint file",
+    )
+    history.add_argument(
+        "--two-head-model-class",
+        default="TwoHeadMLP",
+        choices=["TwoHeadMLP", "SessionEmbeddingMLP", "SessionGatedMLP"],
+        help="TwoHeadMLP model class variant",
     )
 
     tune = sub.add_parser("tune", help="Hyperparameter optimization with Optuna")
@@ -156,6 +204,9 @@ def main() -> None:
             out_dir=out_dir,
             limit=args.limit,
             tune_weights=not args.no_tune_weights,
+            use_two_head=args.use_two_head,
+            two_head_checkpoint=args.two_head_checkpoint,
+            two_head_model_class=args.two_head_model_class,
         )
     elif args.command == "live":
         run_id = args.run_id or _default_live_id()
@@ -170,6 +221,9 @@ def main() -> None:
             tune_weights=not args.no_tune_weights,
             store_candles=not args.no_store_candles,
             overrides=overrides or None,
+            use_two_head=args.use_two_head,
+            two_head_checkpoint=args.two_head_checkpoint,
+            two_head_model_class=args.two_head_model_class,
         )
     elif args.command == "history":
         run_id = args.run_id or _default_history_id()
@@ -190,6 +244,9 @@ def main() -> None:
             store_candles=args.store_candles,
             prefill_minutes=args.prefill_minutes,
             eval_buffer=not args.no_eval_buffer,
+            use_two_head=args.use_two_head,
+            two_head_checkpoint=args.two_head_checkpoint,
+            two_head_model_class=args.two_head_model_class,
         )
     elif args.command == "tune":
         if not HAS_OPTUNA:

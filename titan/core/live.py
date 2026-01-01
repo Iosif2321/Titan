@@ -15,6 +15,15 @@ from titan.core.data.bybit_ws import BybitSpotWebSocket
 from titan.core.data.store import CandleStore
 from titan.core.features.stream import FeatureStream, build_conditions
 from titan.core.models.heuristic import Oscillator, TrendVIC, VolumeMetrix
+
+# Sprint 23: TwoHeadMLP support
+try:
+    from titan.core.models.tft import create_two_head_models, TwoHeadMLP, HAS_TORCH as HAS_TFT
+except ImportError:
+    HAS_TFT = False
+    create_two_head_models = None
+    TwoHeadMLP = None
+
 from titan.core.ensemble import Ensemble
 from titan.core.patterns import PatternExperience, PatternStore
 from titan.core.regime import RegimeDetector
@@ -44,6 +53,9 @@ async def live_loop(
     tune_weights: bool,
     store_candles: bool,
     overrides: Optional[Dict[str, object]] = None,
+    use_two_head: bool = False,
+    two_head_checkpoint: Optional[str] = None,
+    two_head_model_class: str = "TwoHeadMLP",
 ) -> None:
     os.makedirs(out_dir, exist_ok=True)
 
@@ -89,11 +101,25 @@ async def live_loop(
     # Create regime detector for session weights
     regime_detector = RegimeDetector(config_store)
 
-    models = [
-        TrendVIC(config_store),
-        Oscillator(config_store),
-        VolumeMetrix(config_store),
-    ]
+    # Sprint 23: Use TwoHeadMLP if enabled, otherwise use heuristic models
+    two_head_model = None
+    two_head_wrappers = None
+
+    if use_two_head and HAS_TFT:
+        import torch
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        trend_model, aux_model, two_head_model = create_two_head_models(
+            config_store, device, two_head_model_class, two_head_checkpoint
+        )
+        models = [trend_model, aux_model]
+        two_head_wrappers = (trend_model, aux_model)
+        print(f"[Live] Using TwoHeadMLP ({two_head_model_class}) on {device}")
+    else:
+        models = [
+            TrendVIC(config_store),
+            Oscillator(config_store),
+            VolumeMetrix(config_store),
+        ]
 
     feature_stream = FeatureStream(config_store)
     ensemble = Ensemble(config_store, weight_manager, pattern_adjuster=pattern_adjuster)
@@ -256,6 +282,13 @@ async def live_loop(
                 conditions=conditions,
             )
 
+        # Sprint 23: Set session for session-aware TwoHeadMLP models
+        if two_head_wrappers is not None:
+            from titan.core.training.trainer import TFTDataset
+            session = TFTDataset.get_session(candle.ts)
+            for wrapper in two_head_wrappers:
+                wrapper.set_session(session)
+
         outputs = [
             model.predict(features, pattern_context=pattern_contexts.get(model.name))
             for model in models
@@ -312,9 +345,14 @@ async def live_loop(
             decision=decision,
         )
 
+        # Smart Gating: Mark actionable signals based on confidence threshold
+        conf_threshold = float(config_store.get("confidence_filter.threshold", 0.65))
+        is_actionable = decision.confidence >= conf_threshold
+        action_tag = "[ACTION]" if is_actionable else "[WAIT]"
+
         print(
-            f"{candle.iso_time()} decision={decision.direction} "
-            f"conf={decision.confidence:.3f}"
+            f"{candle.iso_time()} {action_tag} Dir={decision.direction} "
+            f"Conf={decision.confidence:.3f} (Threshold: {conf_threshold})"
         )
         return False
 
@@ -414,6 +452,9 @@ def run_live(
     tune_weights: bool,
     store_candles: bool,
     overrides: Optional[Dict[str, object]] = None,
+    use_two_head: bool = False,
+    two_head_checkpoint: Optional[str] = None,
+    two_head_model_class: str = "TwoHeadMLP",
 ) -> None:
     asyncio.run(
         live_loop(
@@ -425,5 +466,8 @@ def run_live(
             tune_weights=tune_weights,
             store_candles=store_candles,
             overrides=overrides,
+            use_two_head=use_two_head,
+            two_head_checkpoint=two_head_checkpoint,
+            two_head_model_class=two_head_model_class,
         )
     )

@@ -4,6 +4,10 @@ from typing import Dict, Optional
 
 from titan.core.config import ConfigStore
 from titan.core.data.schema import Candle
+from titan.core.features.calculator import (
+    StreamingNormalizer,
+    normalize_features_streaming,
+)
 
 
 class RollingStats:
@@ -31,12 +35,15 @@ class RollingStats:
         return self._sum / len(self._values)
 
     def std(self) -> Optional[float]:
+        """Sample standard deviation (ddof=1) to match pandas rolling.std()."""
         n = len(self._values)
         if n < 2:
             return None
         mean = self._sum / n
-        var = (self._sumsq / n) - (mean * mean)
-        return math.sqrt(max(var, 0.0))
+        # Sample variance (ddof=1): divide by (n-1) instead of n
+        # Formula: sum((x - mean)^2) / (n - 1) = (sumsq - n*mean^2) / (n - 1)
+        sample_var = (self._sumsq - n * mean * mean) / (n - 1)
+        return math.sqrt(max(sample_var, 0.0))
 
     def ready(self) -> bool:
         return len(self._values) >= self.maxlen
@@ -80,7 +87,7 @@ class FeatureStream:
         self._price_slow = RollingStats(self._slow_window)
         self._returns = RollingStats(self._vol_window)
         self._volume = RollingStats(self._volume_window)
-        self._volatility = RollingStats(self._vol_window)
+        self._volatility = RollingStats(100)  # 100-period for volatility_z (aligned with batch)
         self._gains = RollingSum(self._rsi_window)
         self._losses = RollingSum(self._rsi_window)
 
@@ -88,7 +95,7 @@ class FeatureStream:
         self._prev_rsi: Optional[float] = None
 
         # Sprint 10: New feature tracking
-        self._price_history: deque = deque(maxlen=5)  # For price momentum
+        self._price_history: deque = deque(maxlen=6)  # For return_5 (need 6 elements: current + 5 previous)
         self._volume_history: deque = deque(maxlen=10)  # For volume trend
 
         # Sprint 14: Extended features for ML
@@ -112,6 +119,16 @@ class FeatureStream:
         self._prev_high: Optional[float] = None
         self._prev_low: Optional[float] = None
         self._prev_typical_price: Optional[float] = None
+
+        # Sprint 23: Stochastic indicator
+        self._stoch_high_14: deque = deque(maxlen=14)  # 14-period high
+        self._stoch_low_14: deque = deque(maxlen=14)  # 14-period low
+        self._stoch_k_history: deque = deque(maxlen=3)  # For %D smoothing
+
+        # Sprint 23: Streaming normalizer for train/inference consistency
+        # FIX: Use window=50 to match batch normalization (must differ from ma_slow's 20)
+        self._normalizer = StreamingNormalizer(window=50)
+        self._normalize_output = bool(config.get("feature.normalize_output", True))
 
     def update(self, candle: Candle) -> Optional[Dict[str, float]]:
         if self._prev_close is None:
@@ -211,8 +228,11 @@ class FeatureStream:
         self._prev_high = candle.high
         self._prev_low = candle.low
 
-        gain = max(ret, 0.0)
-        loss = max(-ret, 0.0)
+        # RSI: use price delta (diff(close)) to match batch calculation
+        # batch uses: delta = df["close"].diff()
+        price_delta = candle.close - prev_close_for_tr
+        gain = max(price_delta, 0.0)
+        loss = max(-price_delta, 0.0)
         self._gains.append(gain)
         self._losses.append(loss)
 
@@ -247,6 +267,11 @@ class FeatureStream:
                 rs = avg_gain / avg_loss
                 rsi = 100.0 - (100.0 / (1.0 + rs))
 
+        # Sprint 23 BUG FIX: Update normalizer BEFORE readiness check
+        # Otherwise first ~20 candles are not added to close_history,
+        # causing batch/stream parity issues (normalizer 20 candles behind)
+        self._normalizer.update_close(candle.close)
+
         if not (
             self._price_slow.ready()
             and self._returns.ready()
@@ -271,13 +296,9 @@ class FeatureStream:
             if old_price > 0:
                 price_momentum_3 = (candle.close - old_price) / old_price
 
-        # 2. Volume trend (recent vs older volume)
-        volume_trend = 0.0
-        if len(self._volume_history) >= 6:
-            recent_vol = sum(list(self._volume_history)[-3:]) / 3
-            older_vol = sum(list(self._volume_history)[-6:-3]) / 3
-            if older_vol > 0:
-                volume_trend = (recent_vol - older_vol) / older_vol
+        # 2. Volume trend (is current volume above its moving average? 0 or 1)
+        # Aligned with batch: volume_trend = (volume > volume_ma).astype(float)
+        volume_trend = 1.0 if candle.volume > (volume_mean or 0) else 0.0
 
         # 3. Candle body ratio (body size / total range)
         total_range = candle.high - candle.low
@@ -306,14 +327,11 @@ class FeatureStream:
                 return_lags[i] = self._return_history[-(i + 1)]
 
         # 7. ATR as percentage of price
+        # Aligned with batch: uses proper True Range from _tr_history
+        # True Range = max(high-low, abs(high-prev_close), abs(low-prev_close))
         atr_pct = 0.0
-        if len(self._high_history) >= 14:
-            tr_sum = 0.0
-            for i in range(14):
-                hi = self._high_history[-(i + 1)]
-                lo = self._low_history[-(i + 1)]
-                tr_sum += hi - lo
-            atr = tr_sum / 14
+        if len(self._tr_history) >= 14:
+            atr = sum(self._tr_history) / 14
             atr_pct = atr / candle.close if candle.close > 0 else 0.0
 
         # 8. High-Low range as percentage of close
@@ -331,14 +349,21 @@ class FeatureStream:
             ema_20_spread_pct = (candle.close - self._ema_20) / candle.close
 
         # 11. Multi-period returns (5 and 10 periods)
+        # Aligned with batch: pct_change(N) = (close - close[N]) / close[N]
         return_5 = 0.0
         return_10 = 0.0
-        if len(self._price_history) >= 5:
-            old_price_5 = self._price_history[0]  # oldest in 5-period history
+        # _price_history has maxlen=6, so when full, index 0 is 5 bars ago
+        if len(self._price_history) >= 6:
+            old_price_5 = self._price_history[0]  # 5 periods ago (oldest in 6-element buffer)
             if old_price_5 > 0:
                 return_5 = (candle.close - old_price_5) / old_price_5
+        # For return_10, we need price from 10 bars ago
+        # Compound the returns: (1+r1)*(1+r2)*...*(1+r10) - 1
         if len(self._return_history) >= 10:
-            return_10 = sum(self._return_history)  # cumulative return
+            compound = 1.0
+            for r in self._return_history:
+                compound *= (1.0 + r)
+            return_10 = compound - 1.0
 
         # 12. RSI zones (oversold/overbought indicators)
         rsi_oversold = 1.0 if rsi_val < 30 else 0.0
@@ -346,55 +371,52 @@ class FeatureStream:
         rsi_neutral = 1.0 if 40 <= rsi_val <= 60 else 0.0
 
         # 13. Volume change percentage
+        # Aligned with batch: clip to [-2, 2]
         volume_change_pct = 0.0
         if len(self._volume_history) >= 2:
             prev_vol = self._volume_history[-2]
             if prev_vol > 0:
                 volume_change_pct = (candle.volume - prev_vol) / prev_vol
+                volume_change_pct = max(-2.0, min(2.0, volume_change_pct))  # clip
 
         # 14. Body size as percentage of close
         body_pct = body / candle.close if candle.close > 0 else 0.0
 
-        # 15. Volatility ratio (current vol vs average)
+        # 15. Volume ratio (current volume vs moving average)
+        # Aligned with batch: vol_ratio = volume / volume_ma
         vol_ratio = 0.0
-        if vol_mean and vol_mean > 0:
-            vol_ratio = (volatility or 0.0) / vol_mean
+        if volume_mean and volume_mean > 0:
+            vol_ratio = candle.volume / volume_mean
 
         # Sprint 16: New predictive features
-        # 16. Volume Imbalance (ratio of up volume to total volume over 20 periods)
+        # 16. Volume Imbalance (volumes above mean vs below mean, over 20 periods)
+        # Aligned with batch: (vol[vol > mean].sum() - vol[vol <= mean].sum()) / total
         vol_imbalance_20 = 0.0
-        if len(self._up_volume) >= 10:  # Need at least 10 periods
-            total_up = sum(self._up_volume)
-            total_down = sum(self._down_volume)
-            total = total_up + total_down
-            if total > 0:
-                vol_imbalance_20 = (total_up - total_down) / total  # -1 to +1
+        if self._volume.ready():
+            # Access internal values from RollingStats
+            vol_list = list(self._volume._values)
+            vol_mean_local = sum(vol_list) / len(vol_list) if vol_list else 0
+            above_mean = sum(v for v in vol_list if v > vol_mean_local)
+            below_mean = sum(v for v in vol_list if v <= vol_mean_local)
+            total_vol = above_mean + below_mean
+            if total_vol > 0:
+                vol_imbalance_20 = (above_mean - below_mean) / total_vol
 
-        # 17. Bollinger Band Position (where price is within the bands, 0-1)
-        bb_position = 0.5  # Default: middle of bands
-        if volatility is not None and ma_slow is not None and volatility > 0:
-            bb_upper = ma_slow + 2 * volatility * candle.close  # 2 std devs
-            bb_lower = ma_slow - 2 * volatility * candle.close
-            bb_width = bb_upper - bb_lower
-            if bb_width > 0:
-                bb_position = (candle.close - bb_lower) / bb_width
-                bb_position = max(0.0, min(1.0, bb_position))  # Clamp 0-1
+        # 17. Bollinger Band Position (where price is within the bands)
+        # Aligned with batch: bb_position = (close - bb_mid) / (2 * bb_std)
+        # This gives values typically in [-1, 1] range (can exceed during extremes)
+        bb_position = 0.0  # Default: at middle of bands
+        bb_std = self._price_slow.std()
+        if bb_std is not None and bb_std > 0 and ma_slow is not None:
+            bb_position = (candle.close - ma_slow) / (2 * bb_std + 1e-10)
 
-        # 18. ADX (Average Directional Index) - trend strength 0-100
+        # 18. ADX (simplified: average of +DM and -DM)
+        # Aligned with batch: adx = (plus_dm.rolling(14).mean() + minus_dm.rolling(14).mean()) / 2
         adx = 0.0
-        if len(self._tr_history) >= 14:
-            atr_14 = sum(self._tr_history) / 14
-            plus_dm_14 = sum(self._plus_dm_history)
-            minus_dm_14 = sum(self._minus_dm_history)
-            if atr_14 > 0:
-                plus_di = 100 * plus_dm_14 / (atr_14 * 14)
-                minus_di = 100 * minus_dm_14 / (atr_14 * 14)
-                di_sum = plus_di + minus_di
-                if di_sum > 0:
-                    dx = 100 * abs(plus_di - minus_di) / di_sum
-                    self._dx_history.append(dx)
-                    if len(self._dx_history) >= 14:
-                        adx = sum(self._dx_history) / 14
+        if len(self._plus_dm_history) >= 14:
+            plus_dm_avg = sum(self._plus_dm_history) / 14
+            minus_dm_avg = sum(self._minus_dm_history) / 14
+            adx = (plus_dm_avg + minus_dm_avg) / 2
 
         # 19. MFI (Money Flow Index) - volume-weighted RSI, 0-100
         mfi = 50.0  # Default: neutral
@@ -407,7 +429,26 @@ class FeatureStream:
             elif pos_flow > 0:
                 mfi = 100.0
 
-        return {
+        # 20. Stochastic %K and %D (Sprint 23)
+        self._stoch_high_14.append(candle.high)
+        self._stoch_low_14.append(candle.low)
+
+        stochastic_k = 50.0  # Default: neutral
+        stochastic_d = 50.0
+        if len(self._stoch_high_14) >= 14:
+            high_14 = max(self._stoch_high_14)
+            low_14 = min(self._stoch_low_14)
+            if high_14 > low_14:
+                stochastic_k = (candle.close - low_14) / (high_14 - low_14) * 100
+            self._stoch_k_history.append(stochastic_k)
+            if len(self._stoch_k_history) >= 3:
+                stochastic_d = sum(self._stoch_k_history) / 3
+
+        # Update normalizer RSI momentum (close already updated earlier)
+        if rsi is not None:
+            self._normalizer.update_rsi_momentum(rsi_momentum)
+
+        features = {
             "close": candle.close,
             "open": candle.open,
             "high": candle.high,
@@ -455,7 +496,16 @@ class FeatureStream:
             "bb_position": bb_position,
             "adx": adx,
             "mfi": mfi,
+            # Sprint 23: Stochastic
+            "stochastic_k": stochastic_k,
+            "stochastic_d": stochastic_d,
         }
+
+        # Sprint 23: Apply normalization for train/inference consistency
+        if self._normalize_output:
+            features = normalize_features_streaming(features, self._normalizer)
+
+        return features
 
 
 def build_conditions(

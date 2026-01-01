@@ -78,80 +78,151 @@
 
 ---
 
-## SPRINT 23: Three-Head TFT Model (NEXT)
+## SPRINT 23: TwoHeadMLP Model (IN PROGRESS - 2025-01-01)
 
-**Заменяем 3 эвристические модели (TrendVIC, Oscillator, VolumeMetrix) на 3 ML-модели с RL-обучением.**
+**ThreeHeadTFT не учится → создан TwoHeadMLP как рабочая альтернатива.**
 
-### Архитектура
+### Статус Sprint 23
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                    THREE-HEAD TFT MODEL                          │
+│    ✅ PIPELINE FIXED - MODEL CAN LEARN                          │
 ├─────────────────────────────────────────────────────────────────┤
-│  INPUTS:                                                         │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────────────┐ │
-│  │ Trend    │  │Oscillator│  │ Volume   │  │ Pattern History  │ │
-│  │ Features │  │ Features │  │ Features │  │ (50 events)      │ │
-│  │ (12 dim) │  │ (10 dim) │  │ (8 dim)  │  │ + Aggregates     │ │
-│  └────┬─────┘  └────┬─────┘  └────┬─────┘  └────────┬─────────┘ │
-│       ▼             ▼             ▼                  ▼           │
-│  ┌─────────────────────────────────────────────────────────────┐│
-│  │              SHARED TFT ENCODER (hidden=64)                 ││
-│  │  - Variable Selection Network                               ││
-│  │  - LSTM Encoder (seq_len=100)                              ││
-│  │  - Multi-Head Attention (heads=4)                          ││
-│  └─────────────────────────────────────────────────────────────┘│
-│       ┌──────────────────────┼──────────────────────┐           │
-│       ▼                      ▼                      ▼           │
-│  ┌─────────┐           ┌─────────┐           ┌─────────┐        │
-│  │ TREND   │           │OSCILLAT │           │ VOLUME  │        │
-│  │  HEAD   │           │  HEAD   │           │  HEAD   │        │
-│  └─────────┘           └─────────┘           └─────────┘        │
+│  Overfit Test:     90.22% (target: ≥90%)            ✅          │
+│  Val Accuracy:     54.07% ± 0.12% (target: ≥54%)    ✅          │
+│  Stability:        std = 0.12% (target: ≤0.5%)      ✅          │
+│  Session Breakdown: EUROPE 55.49%, ASIA 53.36%, US 52.15%  ✅   │
+│                                                                  │
+│  Remaining Issues:                                               │
+│  • Overfitting: train 73% vs val 54%                            │
+│  • ThreeHeadTFT still broken (needs debug)                      │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-### Ключевые решения
+### Per-Session Accuracy (2025-01-01)
 
-| Аспект | Решение |
-|--------|---------|
-| **Архитектура** | TFT (Temporal Fusion Transformer) |
-| **GPU** | GTX 1060 (6GB) → hidden=64, heads=4, seq=100 |
-| **Inputs** | Специализированные фичи для каждой головы |
-| **Training** | Hybrid: Offline pretrain + Online fine-tune |
-| **Reward** | R2 (return-weighted) + streak bonus |
-| **Patterns** | Агрегаты + Attention к 50 событиям |
+| Session | Accuracy | Std | % Samples |
+|---------|----------|-----|-----------|
+| **EUROPE** | **55.49%** | ±1.61% | 36.2% |
+| ASIA | 53.36% | ±0.31% | 39.9% |
+| US | 52.15% | ±0.84% | 24.0% |
+| **Overall** | **53.84%** | ±0.58% | 100% |
 
-### Reward Function
+**Key Insights:**
+- EUROPE is best session (55.49%) - differs from heuristics
+- US is worst session (52.15%)
+- ASIA is most stable (±0.31% variance)
+- Gap: 3.34% between best/worst sessions
 
-```python
-reward = return_pct * direction_match * streak_mult
-# streak_mult = 1.0 + 0.1 * min(streak_length, 5)
+### Исправленные баги (2025-01-01)
+
+| # | Баг | Файл | Проблема | Исправление |
+|---|-----|------|----------|-------------|
+| 1 | Feature order | `tft.py:55-57` | `list(set(...))` = random order | `sorted(set(...))` |
+| 2 | VSN dimension | `tft.py:65` | GRN outputs 32 instead of 33 | `GRN(input_dim, input_dim)` |
+| 3 | TFT can't learn | `tft.py` | Architecture issue | Created TwoHeadMLP |
+| 4 | No normalization | `trainer.py:272` | Raw prices ~88000 | z-scores, /100 scaling |
+| 5 | Target leakage | `trainer.py` | Smoothed-3 saw val returns | Gap between train/val |
+
+### Рабочая архитектура: TwoHeadMLP
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                      TWO-HEAD MLP MODEL                          │
+├─────────────────────────────────────────────────────────────────┤
+│  Input: Sequence [batch, seq_len=50, 33 features]               │
+│                              ↓                                   │
+│  ┌──────────────────────────────────────────────────────────────┐│
+│  │              LSTM Encoder (hidden=64, layers=2)              ││
+│  └──────────────────────────────────────────────────────────────┘│
+│                              ↓                                   │
+│            ┌─────────────────┴─────────────────┐                │
+│            ▼                                   ▼                │
+│  ┌─────────────────────┐         ┌─────────────────────┐        │
+│  │    TREND HEAD       │         │     AUX HEAD        │        │
+│  │  (MLP: 64→32→2)     │         │  (MLP: 64→32→2)     │        │
+│  └─────────────────────┘         └─────────────────────┘        │
+│            ↓                                   ↓                │
+│      [prob_up, prob_down]             [prob_up, prob_down]      │
+└─────────────────────────────────────────────────────────────────┘
+
+Parameters: ~73,000 (vs ~110,000 for ThreeHeadTFT)
+Memory: ~1.5GB training
 ```
 
-### План реализации
+### Результаты тестов (2025-01-01)
+
+| Тест | Цель | Результат | Статус |
+|------|------|-----------|--------|
+| Overfit (450 samples) | ≥90% | 90.22% | ✅ |
+| Val (7d, single target) | - | 52.93% | ℹ️ |
+| Val (7d, smoothed-3, no leak) | ≥54% | **54.07% ± 0.12%** | ✅ |
+
+### Stability Test (3 seeds)
+
+| Run | Seed | Train Acc | Val Acc |
+|-----|------|-----------|---------|
+| 1 | 42 | 72.82% | 54.07% |
+| 2 | 43 | 71.15% | 53.92% |
+| 3 | 44 | 74.37% | 54.22% |
+| **Avg** | - | 72.78% | **54.07%** |
+| **Std** | - | 1.31% | **0.12%** |
+
+### План реализации (обновлено)
 
 | Фаза | Задача | Статус |
 |------|--------|--------|
-| 1 | Создать `titan/core/models/tft.py` | ⏳ Pending |
-| 2 | Создать specialized prediction heads | ⏳ Pending |
-| 3 | Создать `titan/core/training/trainer.py` | ⏳ Pending |
-| 4 | Создать reward calculator | ⏳ Pending |
-| 5 | Интегрировать pattern attention | ⏳ Pending |
-| 6 | Offline pretraining на исторических данных | ⏳ Pending |
-| 7 | Online fine-tuning в live режиме | ⏳ Pending |
-| 8 | Backtest verification | ⏳ Pending |
+| 1 | Создать `titan/core/models/tft.py` | ✅ Done |
+| 2 | Создать specialized prediction heads | ✅ Done |
+| 3 | Создать `titan/core/training/trainer.py` | ✅ Done |
+| 4 | Создать reward calculator | ✅ Done |
+| 5 | Fix pipeline bugs (5 bugs found) | ✅ Done |
+| 6 | Overfit test ≥90% | ✅ Done (90.22%) |
+| 7 | Val acc ≥54% (no leakage) | ✅ Done (54.07%) |
+| 8 | Reduce overfitting | ⏳ Next |
+| 9 | Per-session breakdown | ⏳ Pending |
+| 10 | Compare with heuristics on same target | ⏳ Pending |
+| 11 | Test on 14-day data | ⏳ Pending |
+| 12 | Debug ThreeHeadTFT | ⏳ Later |
+
+### Key Code Changes
+
+**titan/core/models/tft.py:**
+```python
+# Feature order fix (line 55-57)
+ALL_FEATURES = sorted(set(TREND_FEATURES + ...))  # NOT list(set(...))!
+
+# VSN dimension fix (line 65)
+self.flattened_grn = GatedResidualNetwork(input_dim, input_dim, dropout)  # NOT hidden_dim!
+
+# New TwoHeadMLP class added
+class TwoHeadMLP(nn.Module):
+    """Simple LSTM + MLP that actually works."""
+```
+
+**titan/core/training/trainer.py:**
+```python
+# Normalization (lines 272-295)
+df["close"] = (df["close"] - close_mean) / close_std
+df["rsi"] = df["rsi"] / 100.0
+
+# Target smoothing (lines 302-322)
+labels[i] = 1.0 if np.sum(returns[i+1:i+4]) > 0 else 0.0
+
+# Gap for no leakage
+train_size = int(0.8 * total) - gap  # gap = smoothing_window
+```
 
 ### Размеры для GTX 1060 (6GB)
 
-| Параметр | Значение |
-|----------|----------|
-| hidden_dim | 64 |
-| num_heads | 4 |
-| lstm_layers | 2 |
-| seq_len | 100 |
-| pattern_events | 50 |
-| batch_size | 32 |
-| **Estimated Memory** | ~3.5GB |
+| Параметр | TwoHeadMLP | ThreeHeadTFT |
+|----------|------------|--------------|
+| hidden_dim | 64 | 64 |
+| lstm_layers | 2 | 2 |
+| seq_len | 50 | 100 |
+| Parameters | ~73k | ~110k |
+| Memory | ~1.5GB | ~3.5GB |
+| **Status** | ✅ Works | ❌ Broken |
 
 ---
 

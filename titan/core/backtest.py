@@ -15,6 +15,18 @@ from titan.core.config import ConfigStore
 from titan.core.data.loader import CsvCandleReader
 from titan.core.features.stream import FeatureStream, build_conditions
 from titan.core.models.heuristic import Oscillator, TrendVIC, VolumeMetrix
+try:
+    from titan.core.models.tft import (
+        create_tft_models, ThreeHeadTFT,
+        create_two_head_models, TwoHeadMLP,
+        HAS_TORCH as HAS_TFT,
+    )
+except ImportError:
+    HAS_TFT = False
+    create_tft_models = None
+    ThreeHeadTFT = None
+    create_two_head_models = None
+    TwoHeadMLP = None
 from titan.core.models.ml import DirectionalClassifier, create_ml_classifier, HAS_LIGHTGBM
 from titan.core.ensemble import Ensemble
 from titan.core.fusion import TransformerFusion, create_fusion, HAS_TORCH
@@ -1280,6 +1292,11 @@ def run_backtest(
     target_end_ts: Optional[int] = None,
     verbose: bool = True,
     return_stats: bool = False,
+    use_tft: bool = False,
+    tft_checkpoint: Optional[str] = None,
+    use_two_head: bool = False,
+    two_head_checkpoint: Optional[str] = None,
+    two_head_model_class: str = "TwoHeadMLP",
 ) -> Union[Dict[str, object], "BacktestStats"]:
     """Run backtest and return summary dict or stats object.
 
@@ -1352,11 +1369,43 @@ def run_backtest(
         performance_blend=0.3,  # 30% performance, 70% base regime weights
     )
 
-    models = [
-        TrendVIC(config_store),
-        Oscillator(config_store),
-        VolumeMetrix(config_store),
-    ]
+    # Sprint 23: Use TFT or TwoHeadMLP models if enabled
+    tft_model = None
+    two_head_model = None
+    two_head_wrappers = None
+
+    if use_two_head and HAS_TFT:
+        # Use TwoHeadMLP (simpler 2-head architecture)
+        import torch
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        trend_model, aux_model, two_head_model = create_two_head_models(
+            config_store, device, two_head_model_class, two_head_checkpoint
+        )
+        models = [trend_model, aux_model]
+        two_head_wrappers = (trend_model, aux_model)
+        if verbose:
+            print(f"[Backtest] Using TwoHeadMLP ({two_head_model_class}) on {device}")
+    elif use_tft and HAS_TFT:
+        import torch
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        trend_model, osc_model, vol_model, tft_model = create_tft_models(config_store, device)
+
+        # Load checkpoint if provided
+        if tft_checkpoint and os.path.exists(tft_checkpoint):
+            checkpoint = torch.load(tft_checkpoint, map_location=device)
+            tft_model.load_state_dict(checkpoint["model_state_dict"])
+            if verbose:
+                print(f"[Backtest] Loaded TFT checkpoint: {tft_checkpoint}")
+
+        models = [trend_model, osc_model, vol_model]
+        if verbose:
+            print(f"[Backtest] Using TFT models (Three-Head TFT on {device})")
+    else:
+        models = [
+            TrendVIC(config_store),
+            Oscillator(config_store),
+            VolumeMetrix(config_store),
+        ]
 
     # Sprint 14: Create ML classifier for directional prediction
     ml_classifier = create_ml_classifier()
@@ -1612,6 +1661,13 @@ def run_backtest(
                     model_name=model.name,
                     conditions=conditions,
                 )
+
+        # Set session for session-aware TwoHeadMLP models
+        if two_head_wrappers is not None:
+            from titan.core.training.trainer import TFTDataset
+            session = TFTDataset.get_session(candle.ts)
+            for wrapper in two_head_wrappers:
+                wrapper.set_session(session)
 
         outputs = [
             model.predict(features, pattern_context=pattern_contexts.get(model.name))
