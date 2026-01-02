@@ -73,6 +73,7 @@ def run_history_backtest(
     use_two_head: bool = False,
     two_head_checkpoint: Optional[str] = None,
     two_head_model_class: str = "TwoHeadMLP",
+    overrides: Optional[Dict[str, object]] = None,
 ) -> Dict[str, object]:
     """Download historical candles and run backtest.
 
@@ -243,4 +244,5 @@ def run_history_backtest(
         use_two_head=use_two_head,
         two_head_checkpoint=two_head_checkpoint,
         two_head_model_class=two_head_model_class,
+        overrides=overrides,
     )

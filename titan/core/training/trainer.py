@@ -223,9 +223,11 @@ class TFTDataset(Dataset):
         labels = np.zeros(len(returns))
 
         # Smoothed target: sum of next N returns
+        # IMPORTANT: Backtest/live treats delta==0 as UP (see backtest._evaluate: delta >= 0 -> UP).
+        # To keep training/evaluation labels consistent, treat sum==0 as UP as well.
         for i in range(len(returns) - smoothing_window):
             future_returns = returns[i + 1:i + 1 + smoothing_window]
-            labels[i] = 1.0 if np.sum(future_returns) > 0 else 0.0
+            labels[i] = 1.0 if np.sum(future_returns) >= 0 else 0.0
 
         return torch.from_numpy(labels).float()
 

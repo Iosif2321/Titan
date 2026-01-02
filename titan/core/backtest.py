@@ -1268,10 +1268,23 @@ def generate_report_md(
 
 def _tune_weights(stats: BacktestStats, config: ConfigStore) -> Dict[str, float]:
     min_weight = float(config.get("weights.min_weight", 0.1))
+    # Anti-collapse penalty: penalize models whose UP/DOWN mix diverges heavily
+    # from the observed market direction mix. This prevents trivial baselines
+    # (e.g., "always UP") from dominating weights during mildly imbalanced periods.
+    actual_total = stats.actual_counts["UP"] + stats.actual_counts["DOWN"]
+    actual_up_ratio = (stats.actual_counts["UP"] / actual_total) if actual_total > 0 else 0.5
     weights = {}
     total = 0.0
     for name, model_stats in stats.models.items():
-        weight = max(model_stats.accuracy(), min_weight)
+        pred_total = model_stats.up + model_stats.down
+        pred_up_ratio = (model_stats.up / pred_total) if pred_total > 0 else actual_up_ratio
+        divergence = abs(pred_up_ratio - actual_up_ratio)  # 0..1
+        # Map divergence to [0, 1] where 1 = perfect match, 0 = maximally different (0.5 away)
+        balance_penalty = max(0.0, 1.0 - (divergence * 2.0))
+        # Keep a small floor so weights don't become zeroed-out early in a run.
+        balance_penalty = max(balance_penalty, 0.1)
+
+        weight = max(model_stats.accuracy() * balance_penalty, min_weight)
         weights[name] = weight
         total += weight
 
@@ -1297,6 +1310,7 @@ def run_backtest(
     use_two_head: bool = False,
     two_head_checkpoint: Optional[str] = None,
     two_head_model_class: str = "TwoHeadMLP",
+    overrides: Optional[Dict[str, object]] = None,
 ) -> Union[Dict[str, object], "BacktestStats"]:
     """Run backtest and return summary dict or stats object.
 
@@ -1320,6 +1334,10 @@ def run_backtest(
     state_store = StateStore(db_path)
     config_store = ConfigStore(state_store)
     config_store.ensure_defaults()
+    # Optional config overrides (CLI parity with live mode)
+    if overrides:
+        for key, value in overrides.items():
+            config_store.set(key, value)
     # Sprint 12: Pass config for config-driven pattern behavior
     pattern_store = PatternStore(db_path, config=config_store)
 
@@ -1408,8 +1426,10 @@ def run_backtest(
         ]
 
     # Sprint 14: Create ML classifier for directional prediction
-    ml_classifier = create_ml_classifier()
-    ml_enabled = ml_classifier is not None and HAS_LIGHTGBM
+    # Respect config toggle (useful for isolating TwoHeadMLP behavior in tests)
+    ml_cfg_enabled = bool(config_store.get("ml.enabled", True))
+    ml_classifier = create_ml_classifier() if ml_cfg_enabled else None
+    ml_enabled = ml_classifier is not None and HAS_LIGHTGBM and ml_cfg_enabled
     ml_train_interval = int(config_store.get("ml.train_interval", 1000))  # Retrain every N samples
     ml_min_samples = int(config_store.get("ml.min_samples", 500))  # Min samples to start training
     ml_last_train_count = 0

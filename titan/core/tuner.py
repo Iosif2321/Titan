@@ -138,6 +138,14 @@ class AutoTuner:
         self.config = config or TunerConfig()
         self.study: Optional[optuna.Study] = None
         self.results: List[OptimizationResult] = []
+        # On Windows, temporary sqlite DB files can't be deleted while connections are open.
+        # Our unit tests create temp *.db files and expect to delete them in finally blocks.
+        # When the DB lives in the OS temp dir, auto-dispose connections after cheap ops (ask).
+        try:
+            tmp_dir = Path(tempfile.gettempdir()).resolve()
+            self._auto_dispose_temp_db = os.name == "nt" and Path(db_path).resolve().is_relative_to(tmp_dir)
+        except Exception:
+            self._auto_dispose_temp_db = False
 
         # Create/load study
         self._setup_study()
@@ -201,6 +209,47 @@ class AutoTuner:
             f"{len(self.study.trials)} existing trials"
         )
 
+        # Windows NOTE:
+        # Optuna wraps RDBStorage inside CachedStorage and keeps DB connections open.
+        # On Windows this prevents deleting the sqlite file (tests use temp .db files).
+        # Disposing the underlying SQLAlchemy engine releases the file lock while
+        # keeping the Study object usable (engine will reconnect lazily).
+        self._dispose_storage_engine()
+        self._maybe_wrap_study_for_temp_db()
+
+    def _maybe_wrap_study_for_temp_db(self) -> None:
+        """Wrap Study methods to dispose connections for temp sqlite DBs (Windows tests)."""
+        if not getattr(self, "_auto_dispose_temp_db", False):
+            return
+        if self.study is None:
+            return
+        try:
+            orig_ask = self.study.ask
+
+            def ask(*args, **kwargs):  # type: ignore[no-untyped-def]
+                trial = orig_ask(*args, **kwargs)
+                self._dispose_storage_engine()
+                return trial
+
+            # Monkey-patch (best-effort) to avoid Windows file locks in tests
+            self.study.ask = ask  # type: ignore[method-assign]
+        except Exception:
+            return
+
+    def _dispose_storage_engine(self) -> None:
+        """Dispose Optuna RDBStorage engine if present (releases sqlite file locks)."""
+        if self.study is None:
+            return
+        try:
+            storage = getattr(self.study, "_storage", None)
+            backend = getattr(storage, "_backend", None)  # CachedStorage -> RDBStorage
+            engine = getattr(backend, "engine", None)
+            if engine is not None:
+                engine.dispose()
+        except Exception:
+            # Best-effort cleanup; do not fail tuning if disposal isn't available.
+            return
+
     def _suggest_params(self, trial: Trial) -> Dict[str, Any]:
         """Suggest parameters for a trial."""
         params = {}
@@ -231,6 +280,12 @@ class AutoTuner:
                     min_val,
                     max_val,
                 )
+
+        # For temp sqlite DBs on Windows (unit tests), parameter suggestion can open
+        # new DB connections via Trial.suggest_* calls. Dispose them so the temp
+        # file can be deleted in test finally blocks.
+        if getattr(self, "_auto_dispose_temp_db", False):
+            self._dispose_storage_engine()
 
         return params
 
@@ -650,6 +705,7 @@ class AutoTuner:
 
     def close(self) -> None:
         """Close study and release database connections."""
+        self._dispose_storage_engine()
         # Optuna handles connections internally, just clear reference
         self.study = None
 

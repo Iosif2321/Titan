@@ -188,10 +188,18 @@ class Oscillator(BaseModel):
         features: Dict[str, float],
         pattern_context: Optional[PatternContext] = None,
     ) -> ModelOutput:
-        rsi = features.get("rsi", 50.0)
+        # NOTE: In Sprint 23 the unified feature pipeline normalizes oscillators:
+        # - batch: rsi / 100.0  -> [0, 1]
+        # - stream: rsi / 100.0 -> [0, 1]
+        # Heuristic models historically used RSI in [0, 100]. Support both.
+        rsi = float(features.get("rsi", 50.0))
+        if 0.0 <= rsi <= 1.5:
+            rsi *= 100.0
         rsi_momentum = features.get("rsi_momentum", 0.0)
         vol_z = features.get("volatility_z", 0.0)
-        bb_position = features.get("bb_position", 0.5)
+        # bb_position is computed as (close - bb_mid) / (2*bb_std) -> approx [-1, 1]
+        # (NOT 0..1). 0 = mid, -1 = lower band, +1 = upper band.
+        bb_position = float(features.get("bb_position", 0.0))
 
         # Distance from equilibrium (50)
         distance_from_50 = abs(rsi - 50.0)
@@ -238,12 +246,12 @@ class Oscillator(BaseModel):
             strength *= 0.8
 
         # Bollinger Band confirmation (Sprint 16)
-        # bb_position: 0 = lower band, 1 = upper band
-        # Mean reversion: low bb -> UP, high bb -> DOWN
+        # bb_position ~ [-1, 1]: mean reversion expects UP near lower band (< -0.7),
+        # DOWN near upper band (> +0.7)
         bb_factor = 1.0
         if rsi < 50:
             # Expecting UP - confirm with low bb_position
-            if bb_position < 0.3:
+            if bb_position < -0.7:
                 bb_factor = 1.15  # Near lower band confirms oversold
             elif bb_position > 0.7:
                 bb_factor = 0.85  # Near upper band contradicts
@@ -251,7 +259,7 @@ class Oscillator(BaseModel):
             # Expecting DOWN - confirm with high bb_position
             if bb_position > 0.7:
                 bb_factor = 1.15  # Near upper band confirms overbought
-            elif bb_position < 0.3:
+            elif bb_position < -0.7:
                 bb_factor = 0.85  # Near lower band contradicts
 
         strength *= bb_factor

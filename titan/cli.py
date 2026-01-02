@@ -74,10 +74,16 @@ def main() -> None:
         choices=["TwoHeadMLP", "SessionEmbeddingMLP", "SessionGatedMLP"],
         help="TwoHeadMLP model class variant",
     )
+    backtest.add_argument(
+        "--set",
+        action="append",
+        default=[],
+        help="Override config value, format: key=value",
+    )
 
     live = sub.add_parser("live", help="Run live websocket test")
     live.add_argument("--symbol", default="BTCUSDT", help="Market symbol")
-    live.add_argument("--interval", default="1", help="Kline interval in minutes")
+    live.add_argument("--interval", default="5", help="Kline interval in minutes (default: 5)")
     live.add_argument("--db", default="titan.db", help="SQLite DB path")
     live.add_argument("--out", default="runs", help="Output directory")
     live.add_argument("--run-id", default=None, help="Custom run id")
@@ -122,7 +128,7 @@ def main() -> None:
 
     history = sub.add_parser("history", help="Download historical data and backtest")
     history.add_argument("--symbol", default="BTCUSDT", help="Market symbol")
-    history.add_argument("--interval", default="1", help="Kline interval in minutes")
+    history.add_argument("--interval", default="5", help="Kline interval in minutes (default: 5)")
     history.add_argument("--start", default=None, help="Start time (ISO8601 or epoch)")
     history.add_argument("--end", default=None, help="End time (ISO8601 or epoch)")
     history.add_argument("--hours", type=float, default=None, help="Lookback window in hours")
@@ -166,6 +172,12 @@ def main() -> None:
         choices=["TwoHeadMLP", "SessionEmbeddingMLP", "SessionGatedMLP"],
         help="TwoHeadMLP model class variant",
     )
+    history.add_argument(
+        "--set",
+        action="append",
+        default=[],
+        help="Override config value, format: key=value",
+    )
 
     tune = sub.add_parser("tune", help="Hyperparameter optimization with Optuna")
     tune.add_argument("--csv", required=True, help="Path to 1m OHLCV CSV for optimization")
@@ -198,6 +210,7 @@ def main() -> None:
     if args.command == "backtest":
         run_id = args.run_id or _default_run_id()
         out_dir = os.path.join(args.out, run_id)
+        overrides = _parse_overrides(args.set)
         run_backtest(
             csv_path=args.csv,
             db_path=args.db,
@@ -207,6 +220,7 @@ def main() -> None:
             use_two_head=args.use_two_head,
             two_head_checkpoint=args.two_head_checkpoint,
             two_head_model_class=args.two_head_model_class,
+            overrides=overrides or None,
         )
     elif args.command == "live":
         run_id = args.run_id or _default_live_id()
@@ -233,6 +247,7 @@ def main() -> None:
         except ValueError as exc:
             raise SystemExit(str(exc)) from exc
 
+        overrides = _parse_overrides(args.set)
         run_history_backtest(
             symbol=args.symbol,
             interval=args.interval,
@@ -247,6 +262,7 @@ def main() -> None:
             use_two_head=args.use_two_head,
             two_head_checkpoint=args.two_head_checkpoint,
             two_head_model_class=args.two_head_model_class,
+            overrides=overrides or None,
         )
     elif args.command == "tune":
         if not HAS_OPTUNA:

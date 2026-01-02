@@ -20,16 +20,25 @@ from titan.core.state_store import StateStore
 from titan.core.features.stream import FeatureStream
 from titan.core.training import TFTDataset
 from titan.core.models.tft import ALL_FEATURES, TREND_FEATURES, OSCILLATOR_FEATURES, VOLUME_FEATURES
-from titan.core.data.schema import Candle
+from titan.core.data.schema import Candle, parse_timestamp
 
 
 def load_candles_from_csv(csv_path: str) -> List[Candle]:
     """Load candles from CSV file."""
     df = pd.read_csv(csv_path)
+    # Support both column conventions:
+    # - cli_tft.py historically used "ts"
+    # - history/backtest uses "timestamp"
+    if "ts" in df.columns:
+        ts_col = "ts"
+    elif "timestamp" in df.columns:
+        ts_col = "timestamp"
+    else:
+        raise ValueError("CSV must contain either 'ts' or 'timestamp' column")
     candles = []
     for _, row in df.iterrows():
         candle = Candle(
-            ts=int(row["ts"]),
+            ts=parse_timestamp(row[ts_col]),
             open=float(row["open"]),
             high=float(row["high"]),
             low=float(row["low"]),

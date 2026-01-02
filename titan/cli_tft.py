@@ -42,7 +42,8 @@ def fetch_training_data(symbol: str, interval: str, hours: int) -> str:
     data = []
     for c in candles:
         data.append({
-            "ts": c.ts,
+            # Keep column name aligned with CsvCandleReader/TFTDataset ("timestamp")
+            "timestamp": c.ts,
             "open": c.open,
             "high": c.high,
             "low": c.low,
@@ -246,7 +247,7 @@ def main():
     train_parser.add_argument("--model-class", default="TwoHeadMLP", 
                              choices=["ThreeHeadTFT", "TwoHeadMLP", "SessionEmbeddingMLP", "SessionGatedMLP"])
     train_parser.add_argument("--symbol", default="BTCUSDT")
-    train_parser.add_argument("--interval", default="1")
+    train_parser.add_argument("--interval", default="5", help="Candle interval in minutes (default: 5)")
     train_parser.add_argument("--hours", type=int, default=168)
     train_parser.add_argument("--epochs", type=int, default=50)
     train_parser.add_argument("--batch-size", type=int, default=32)

@@ -217,25 +217,15 @@ class Ensemble:
             prob_up = weighted_up / total_weight
             prob_down = weighted_down / total_weight
 
-        # Define thresholds (needed for direction logic below)
-        # Use get_param to respect override_params from SessionAdapter
-        flat_threshold = get_param("ensemble.flat_threshold", 0.55)
-        min_margin = get_param("ensemble.min_margin", 0.05)
-        confidence = max(prob_up, prob_down)
-        margin = abs(prob_up - prob_down)
+        # Always return UP or DOWN.
+        #
+        # Optional bias control:
+        # - ensemble.up_threshold = 0.50 (default): UP if prob_up >= 0.50 else DOWN
+        # - >0.50 biases toward DOWN, <0.50 biases toward UP
+        up_threshold = get_param("ensemble.up_threshold", 0.50)
+        direction = "UP" if prob_up >= up_threshold else "DOWN"
 
-        # Always return UP or DOWN - FLAT only when explicitly uncertain
-        # FLAT is undesirable; even a weak signal is better than abstaining
-        if confidence >= flat_threshold and margin >= min_margin:
-            # High confidence decision
-            direction = "UP" if prob_up >= prob_down else "DOWN"
-        elif margin >= 0.01:
-            # Low confidence but there's a clear direction - use it
-            direction = "UP" if prob_up >= prob_down else "DOWN"
-        else:
-            # Truly tied (margin < 1%) - still pick one, FLAT is last resort
-            # Use prob_up/prob_down to break ties (works with both fusion and weighted)
-            direction = "UP" if prob_up >= prob_down else "DOWN"
+        confidence = max(prob_up, prob_down)
 
         # Apply confidence compression to fix overconfidence problem
         # High confidence (65%+) historically has LOWER accuracy (33-47%)

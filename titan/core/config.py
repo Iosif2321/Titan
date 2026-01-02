@@ -75,6 +75,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "online.exploration_rate": 0.1,
     "ensemble.flat_threshold": 0.571,  # Optuna: 0.5711
     "ensemble.min_margin": 0.062,  # Optuna: 0.0619
+    # Direction threshold: ALWAYS output UP/DOWN.
+    # 0.50 = unbiased, >0.50 biases toward DOWN, <0.50 biases toward UP.
+    "ensemble.up_threshold": 0.50,
     "ensemble.vol_z_high": 1.0,
     "ensemble.trendvic_high_scale": 0.6,
     "ensemble.high_vol_flat_add": 0.05,
