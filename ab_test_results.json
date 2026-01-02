@@ -1,0 +1,238 @@
+{
+  "hours": 168,
+  "symbol": "BTCUSDT",
+  "total_samples": 10139,
+  "results": [
+    {
+      "name": "BASELINE",
+      "ensemble_accuracy": 48.20988263142322,
+      "model_accuracies": {
+        "TRENDVIC": 0.48989052174770686,
+        "OSCILLATOR": 0.5115889140940921,
+        "VOLUMEMETRIX": 0.47687148633987575
+      },
+      "high_conf_accuracy": 48.199620972836385,
+      "high_conf_count": 7915
+    },
+    {
+      "name": "OSC_add_volume_z",
+      "ensemble_accuracy": 48.16056810336325,
+      "model_accuracies": {
+        "TRENDVIC": 0.48989052174770686,
+        "OSCILLATOR": 0.5115889140940921,
+        "VOLUMEMETRIX": 0.47687148633987575
+      },
+      "high_conf_accuracy": 48.19444444444444,
+      "high_conf_count": 7920
+    },
+    {
+      "name": "OSC_add_volume_z_return1",
+      "ensemble_accuracy": 48.16056810336325,
+      "model_accuracies": {
+        "TRENDVIC": 0.48989052174770686,
+        "OSCILLATOR": 0.5115889140940921,
+        "VOLUMEMETRIX": 0.47687148633987575
+      },
+      "high_conf_accuracy": 48.19444444444444,
+      "high_conf_count": 7920
+    },
+    {
+      "name": "OSC_add_rsi_zones",
+      "ensemble_accuracy": 48.39727783805109,
+      "model_accuracies": {
+        "TRENDVIC": 0.48989052174770686,
+        "OSCILLATOR": 0.5115889140940921,
+        "VOLUMEMETRIX": 0.47687148633987575
+      },
+      "high_conf_accuracy": 48.268890573666916,
+      "high_conf_count": 7914
+    },
+    {
+      "name": "OSC_full",
+      "ensemble_accuracy": 48.36768912121511,
+      "model_accuracies": {
+        "TRENDVIC": 0.48989052174770686,
+        "OSCILLATOR": 0.5115889140940921,
+        "VOLUMEMETRIX": 0.47687148633987575
+      },
+      "high_conf_accuracy": 48.26454625773066,
+      "high_conf_count": 7923
+    },
+    {
+      "name": "TREND_remove_dead",
+      "ensemble_accuracy": 48.43672946049906,
+      "model_accuracies": {
+        "TRENDVIC": 0.48989052174770686,
+        "OSCILLATOR": 0.5115889140940921,
+        "VOLUMEMETRIX": 0.47687148633987575
+      },
+      "high_conf_accuracy": 48.420687261367576,
+      "high_conf_count": 8643
+    },
+    {
+      "name": "TREND_add_wick",
+      "ensemble_accuracy": 48.535358516619,
+      "model_accuracies": {
+        "TRENDVIC": 0.48989052174770686,
+        "OSCILLATOR": 0.5115889140940921,
+        "VOLUMEMETRIX": 0.47687148633987575
+      },
+      "high_conf_accuracy": 48.44511487584126,
+      "high_conf_count": 8618
+    },
+    {
+      "name": "TREND_use_pct",
+      "ensemble_accuracy": 49.09754413650261,
+      "model_accuracies": {
+        "TRENDVIC": 0.48989052174770686,
+        "OSCILLATOR": 0.5115889140940921,
+        "VOLUMEMETRIX": 0.47687148633987575
+      },
+      "high_conf_accuracy": 48.44430114460745,
+      "high_conf_count": 6203
+    },
+    {
+      "name": "TREND_add_ema",
+      "ensemble_accuracy": 49.1172699477266,
+      "model_accuracies": {
+        "TRENDVIC": 0.48989052174770686,
+        "OSCILLATOR": 0.5115889140940921,
+        "VOLUMEMETRIX": 0.47687148633987575
+      },
+      "high_conf_accuracy": 48.41935483870968,
+      "high_conf_count": 6200
+    },
+    {
+      "name": "TREND_add_return5",
+      "ensemble_accuracy": 49.127132853338594,
+      "model_accuracies": {
+        "TRENDVIC": 0.48989052174770686,
+        "OSCILLATOR": 0.5115889140940921,
+        "VOLUMEMETRIX": 0.47687148633987575
+      },
+      "high_conf_accuracy": 48.41052121994514,
+      "high_conf_count": 6197
+    },
+    {
+      "name": "TREND_full",
+      "ensemble_accuracy": 49.127132853338594,
+      "model_accuracies": {
+        "TRENDVIC": 0.48989052174770686,
+        "OSCILLATOR": 0.5115889140940921,
+        "VOLUMEMETRIX": 0.47687148633987575
+      },
+      "high_conf_accuracy": 48.41052121994514,
+      "high_conf_count": 6197
+    },
+    {
+      "name": "VOL_remove_dead",
+      "ensemble_accuracy": 49.27507643751849,
+      "model_accuracies": {
+        "TRENDVIC": 0.48989052174770686,
+        "OSCILLATOR": 0.5115889140940921,
+        "VOLUMEMETRIX": 0.4806193904724332
+      },
+      "high_conf_accuracy": 48.944387229660144,
+      "high_conf_count": 7768
+    },
+    {
+      "name": "VOL_add_change",
+      "ensemble_accuracy": 49.166584475786564,
+      "model_accuracies": {
+        "TRENDVIC": 0.48989052174770686,
+        "OSCILLATOR": 0.5115889140940921,
+        "VOLUMEMETRIX": 0.4806193904724332
+      },
+      "high_conf_accuracy": 49.01584867075665,
+      "high_conf_count": 7824
+    },
+    {
+      "name": "VOL_add_body",
+      "ensemble_accuracy": 49.156721570174575,
+      "model_accuracies": {
+        "TRENDVIC": 0.48989052174770686,
+        "OSCILLATOR": 0.5115889140940921,
+        "VOLUMEMETRIX": 0.4806193904724332
+      },
+      "high_conf_accuracy": 48.85057471264368,
+      "high_conf_count": 7830
+    },
+    {
+      "name": "VOL_add_atr",
+      "ensemble_accuracy": 49.17644738139856,
+      "model_accuracies": {
+        "TRENDVIC": 0.48989052174770686,
+        "OSCILLATOR": 0.5115889140940921,
+        "VOLUMEMETRIX": 0.4806193904724332
+      },
+      "high_conf_accuracy": 48.87016468785906,
+      "high_conf_count": 7833
+    },
+    {
+      "name": "VOL_full",
+      "ensemble_accuracy": 49.156721570174575,
+      "model_accuracies": {
+        "TRENDVIC": 0.48989052174770686,
+        "OSCILLATOR": 0.5115889140940921,
+        "VOLUMEMETRIX": 0.4806193904724332
+      },
+      "high_conf_accuracy": 48.85057471264368,
+      "high_conf_count": 7830
+    },
+    {
+      "name": "COMBO_trend_ema",
+      "ensemble_accuracy": 49.1172699477266,
+      "model_accuracies": {
+        "TRENDVIC": 0.48989052174770686,
+        "OSCILLATOR": 0.5115889140940921,
+        "VOLUMEMETRIX": 0.47687148633987575
+      },
+      "high_conf_accuracy": 48.41935483870968,
+      "high_conf_count": 6200
+    },
+    {
+      "name": "COMBO_trend_vol",
+      "ensemble_accuracy": 49.73863300128218,
+      "model_accuracies": {
+        "TRENDVIC": 0.48989052174770686,
+        "OSCILLATOR": 0.5115889140940921,
+        "VOLUMEMETRIX": 0.4806193904724332
+      },
+      "high_conf_accuracy": 49.78683966635774,
+      "high_conf_count": 5395
+    },
+    {
+      "name": "COMBO_trend_osc",
+      "ensemble_accuracy": 49.09754413650261,
+      "model_accuracies": {
+        "TRENDVIC": 0.48989052174770686,
+        "OSCILLATOR": 0.5115889140940921,
+        "VOLUMEMETRIX": 0.47687148633987575
+      },
+      "high_conf_accuracy": 48.48581958019548,
+      "high_conf_count": 6241
+    },
+    {
+      "name": "COMBO_all_best",
+      "ensemble_accuracy": 49.80767334056613,
+      "model_accuracies": {
+        "TRENDVIC": 0.48989052174770686,
+        "OSCILLATOR": 0.5115889140940921,
+        "VOLUMEMETRIX": 0.4806193904724332
+      },
+      "high_conf_accuracy": 49.85310319500551,
+      "high_conf_count": 5446
+    },
+    {
+      "name": "COMBO_all_full",
+      "ensemble_accuracy": 49.58082651149029,
+      "model_accuracies": {
+        "TRENDVIC": 0.48989052174770686,
+        "OSCILLATOR": 0.5115889140940921,
+        "VOLUMEMETRIX": 0.4806193904724332
+      },
+      "high_conf_accuracy": 49.607878898413276,
+      "high_conf_count": 5483
+    }
+  ]
+}

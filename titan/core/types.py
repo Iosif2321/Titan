@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 
 @dataclass(frozen=True)
@@ -17,6 +17,23 @@ class Decision:
     confidence: float
     prob_up: float
     prob_down: float
+
+
+@dataclass(frozen=True)
+class PatternContext:
+    pattern_id: int
+    pattern_key: str
+    model_name: str
+    match_ratio: float
+    accuracy: float
+    up_accuracy: float
+    down_accuracy: float
+    bias: Optional[str]
+    trust_confidence: float
+    overconfident: bool
+    confidence_cap: Optional[float]
+    feature_insights: Dict[str, Dict[str, float]]
+    temporal_insights: Dict[str, Dict[str, float]]
 
 
 @dataclass(frozen=True)

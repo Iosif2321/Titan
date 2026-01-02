@@ -4,17 +4,31 @@ import os
 import time
 from typing import Dict, Optional
 
+from titan.core.adapters.pattern import PatternAdjuster, PatternModelAdjuster, PatternReader
+from titan.core.adapters.session import SessionAdapter
+from titan.core.online import create_online_adapter
 from titan.core.backtest import BacktestStats, DetailWriter, _evaluate, _model_decision, _tune_weights
+from titan.core.calibration import OnlineCalibrator
 from titan.core.config import ConfigStore
 from titan.core.data.bybit_rest import fetch_klines, interval_to_ms
 from titan.core.data.bybit_ws import BybitSpotWebSocket
 from titan.core.data.store import CandleStore
 from titan.core.features.stream import FeatureStream, build_conditions
 from titan.core.models.heuristic import Oscillator, TrendVIC, VolumeMetrix
+
+# Sprint 23: TwoHeadMLP support
+try:
+    from titan.core.models.tft import create_two_head_models, TwoHeadMLP, HAS_TORCH as HAS_TFT
+except ImportError:
+    HAS_TFT = False
+    create_two_head_models = None
+    TwoHeadMLP = None
+
 from titan.core.ensemble import Ensemble
-from titan.core.patterns import PatternStore
+from titan.core.patterns import PatternExperience, PatternStore
+from titan.core.regime import RegimeDetector
 from titan.core.state_store import StateStore
-from titan.core.types import PredictionRecord
+from titan.core.types import Decision, PatternContext, PredictionRecord
 from titan.core.weights import WeightManager
 
 
@@ -39,6 +53,9 @@ async def live_loop(
     tune_weights: bool,
     store_candles: bool,
     overrides: Optional[Dict[str, object]] = None,
+    use_two_head: bool = False,
+    two_head_checkpoint: Optional[str] = None,
+    two_head_model_class: str = "TwoHeadMLP",
 ) -> None:
     os.makedirs(out_dir, exist_ok=True)
 
@@ -49,17 +66,64 @@ async def live_loop(
         _apply_overrides(config_store, overrides)
 
     weight_manager = WeightManager(state_store)
-    pattern_store = PatternStore(db_path)
+    # Sprint 12: Pass config for config-driven pattern behavior
+    pattern_store = PatternStore(db_path, config=config_store)
     candle_store = CandleStore(db_path) if store_candles else None
 
-    models = [
-        TrendVIC(config_store),
-        Oscillator(config_store),
-        VolumeMetrix(config_store),
-    ]
+    # Sprint 13: Create pattern experience and adjuster
+    pattern_experience = PatternExperience(pattern_store)
+    pattern_adjuster = PatternAdjuster(
+        pattern_experience, config_store, model_name="ENSEMBLE"
+    )
+    pattern_reader = PatternReader(pattern_store, config_store)
+    pattern_model_adjuster = PatternModelAdjuster(pattern_reader, config_store)
+    model_adjuster_enabled = bool(
+        config_store.get("pattern.model_adjuster_enabled", False)
+    )
+
+    # Sprint 17: Create session adapter for per-session adaptation
+    session_db_path = db_path.replace(".db", "_session.db") if db_path.endswith(".db") else db_path + "_session"
+    session_adapter_enabled = bool(config_store.get("session_adapter.enabled", True))
+    session_adapter = SessionAdapter(
+        session_db_path,
+        config_store,
+        enabled=session_adapter_enabled,
+    )
+    if session_adapter_enabled:
+        print(f"[Live] Session Adapter enabled (Thompson Sampling)")
+
+    # Sprint 20: Create online learning adapter
+    online_enabled = bool(config_store.get("online.enabled", True))
+    online_adapter = create_online_adapter(config_store, enabled=online_enabled)
+    if online_enabled:
+        print(f"[Live] Online Learning enabled (SGD + RMSProp)")
+
+    # Create regime detector for session weights
+    regime_detector = RegimeDetector(config_store)
+
+    # Sprint 23: Use TwoHeadMLP if enabled, otherwise use heuristic models
+    two_head_model = None
+    two_head_wrappers = None
+
+    if use_two_head and HAS_TFT:
+        import torch
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        trend_model, aux_model, two_head_model = create_two_head_models(
+            config_store, device, two_head_model_class, two_head_checkpoint
+        )
+        models = [trend_model, aux_model]
+        two_head_wrappers = (trend_model, aux_model)
+        print(f"[Live] Using TwoHeadMLP ({two_head_model_class}) on {device}")
+    else:
+        models = [
+            TrendVIC(config_store),
+            Oscillator(config_store),
+            VolumeMetrix(config_store),
+        ]
 
     feature_stream = FeatureStream(config_store)
-    ensemble = Ensemble(config_store, weight_manager)
+    ensemble = Ensemble(config_store, weight_manager, pattern_adjuster=pattern_adjuster)
+    calibrator = OnlineCalibrator(config_store, state_store)
 
     stats = BacktestStats([model.name for model in models])
     details_path = os.path.join(out_dir, "predictions.jsonl")
@@ -91,12 +155,18 @@ async def live_loop(
 
         if pending is not None:
             outcome = _evaluate(pending, candle.close)
+            raw_confidence = max(pending.decision.prob_up, pending.decision.prob_down)
+            calibrator.update(
+                raw_confidence,
+                pending.decision.direction == outcome.actual_direction,
+            )
             model_decisions: Dict[str, str] = {}
 
             for output in pending.outputs:
                 model_direction = _model_decision(output, config_store)
                 model_decisions[output.model_name] = model_direction
                 event = {
+                    "price": pending.price,
                     "model_state": output.state,
                     "forecast": {
                         "prob_up": output.prob_up,
@@ -111,16 +181,84 @@ async def live_loop(
                         "hit": model_direction == outcome.actual_direction,
                     },
                 }
+                # Sprint 12: Pass features_snapshot for 100% storage
                 pattern_store.record_usage(
                     pending.pattern_id,
                     output.model_name,
                     event,
                     event_ts=pending.ts,
+                    features_snapshot=pending.features,
                 )
+
+            ensemble_event = {
+                "price": pending.price,
+                "model_state": {"ensemble": True},
+                "forecast": {
+                    "prob_up": pending.decision.prob_up,
+                    "prob_down": pending.decision.prob_down,
+                    "direction": pending.decision.direction,
+                },
+                "metrics": {},
+                "outcome": {
+                    "actual_direction": outcome.actual_direction,
+                    "price_delta": outcome.price_delta,
+                    "return_pct": outcome.return_pct,
+                    "hit": pending.decision.direction == outcome.actual_direction,
+                },
+            }
+            pattern_store.record_usage(
+                pending.pattern_id,
+                "ENSEMBLE",
+                ensemble_event,
+                event_ts=pending.ts,
+                features_snapshot=pending.features,
+            )
 
             stats.update(pending, outcome, model_decisions)
             detail_writer.write(pending, outcome, model_decisions)
             evaluated += 1
+
+            # Sprint 17: Record outcome to session adapter for learning
+            if session_adapter_enabled:
+                session = session_adapter.get_session(pending.ts)
+                pending_regime = regime_detector.detect(pending.features)
+                is_hit = pending.decision.direction == outcome.actual_direction
+                for output in pending.outputs:
+                    model_dir = model_decisions[output.model_name]
+                    model_hit = model_dir == outcome.actual_direction
+                    session_adapter.record_outcome(
+                        session=session,
+                        model=output.model_name,
+                        regime=pending_regime,
+                        hit=model_hit,
+                        conf=max(output.prob_up, output.prob_down),
+                        return_pct=outcome.return_pct,
+                        ts=pending.ts,
+                    )
+                # Also record ensemble outcome
+                session_adapter.record_outcome(
+                    session=session,
+                    model="ENSEMBLE",
+                    regime=pending_regime,
+                    hit=is_hit,
+                    conf=pending.decision.confidence,
+                    return_pct=outcome.return_pct,
+                    ts=pending.ts,
+                )
+
+            # Sprint 20: Record outcome to online learning adapter
+            if online_enabled:
+                model_confs = {
+                    output.model_name: max(output.prob_up, output.prob_down)
+                    for output in pending.outputs
+                }
+                online_adapter.record_outcome(
+                    model_decisions=model_decisions,
+                    actual_direction=outcome.actual_direction,
+                    model_confs=model_confs,
+                    ensemble_hit=pending.decision.direction == outcome.actual_direction,
+                    return_pct=outcome.return_pct,
+                )
 
             if tune_weights:
                 tuned = _tune_weights(stats, config_store)
@@ -129,10 +267,74 @@ async def live_loop(
             if max_predictions is not None and evaluated >= max_predictions:
                 return True
 
-        outputs = [model.predict(features) for model in models]
-        decision = ensemble.decide(outputs)
-        conditions = build_conditions(features, config_store)
-        pattern_id = pattern_store.get_or_create(conditions)
+        # Get pattern_id first so we can pass it to ensemble.decide()
+        # Sprint 12: Pass ts for extended conditions (hour, session, day_of_week)
+        conditions = build_conditions(features, config_store, ts=candle.ts)
+        pattern_id = pattern_store.get_or_create(conditions, ts=candle.ts)
+
+        pattern_contexts: Dict[str, Optional[PatternContext]] = {}
+        for model in models:
+            pattern_contexts[model.name] = pattern_reader.build_context(
+                pattern_id,
+                features,
+                ts=candle.ts,
+                model_name=model.name,
+                conditions=conditions,
+            )
+
+        # Sprint 23: Set session for session-aware TwoHeadMLP models
+        if two_head_wrappers is not None:
+            from titan.core.training.trainer import TFTDataset
+            session = TFTDataset.get_session(candle.ts)
+            for wrapper in two_head_wrappers:
+                wrapper.set_session(session)
+
+        outputs = [
+            model.predict(features, pattern_context=pattern_contexts.get(model.name))
+            for model in models
+        ]
+        if model_adjuster_enabled:
+            outputs = [
+                pattern_model_adjuster.adjust_model_output(
+                    output, pattern_id, conditions=conditions, ts=candle.ts
+                )
+                for output in outputs
+            ]
+
+        # Sprint 17: Get session-specific weights if enabled
+        override_weights = None
+        current_session = None
+        session_params = None
+        if session_adapter_enabled:
+            current_session = session_adapter.get_session(candle.ts)
+            current_regime = regime_detector.detect(features)
+            override_weights = session_adapter.get_weights(current_session, current_regime)
+            # BUG FIX: Actually use the Thompson Sampling params
+            session_params = session_adapter.get_all_params(current_session)
+        elif online_enabled:
+            # BUG FIX: Use online-learned weights when session adapter is disabled
+            online_weights = online_adapter.get_weights()
+            if online_weights:
+                override_weights = online_weights
+
+        # Sprint 13: Pass pattern_id for experience-based adjustment
+        decision = ensemble.decide(
+            outputs, features, ts=candle.ts, pattern_id=pattern_id,
+            override_weights=override_weights,
+            override_params=session_params,
+        )
+
+        # Apply calibration: first online calibrator, then session-specific
+        calibrated_conf = calibrator.calibrate(decision.confidence)
+        if session_adapter_enabled and current_session:
+            calibrated_conf = session_adapter.calibrate_confidence(current_session, calibrated_conf)
+
+        decision = Decision(
+            direction=decision.direction,
+            confidence=calibrated_conf,
+            prob_up=decision.prob_up,
+            prob_down=decision.prob_down,
+        )
 
         pending = PredictionRecord(
             ts=candle.ts,
@@ -143,9 +345,14 @@ async def live_loop(
             decision=decision,
         )
 
+        # Smart Gating: Mark actionable signals based on confidence threshold
+        conf_threshold = float(config_store.get("confidence_filter.threshold", 0.65))
+        is_actionable = decision.confidence >= conf_threshold
+        action_tag = "[ACTION]" if is_actionable else "[WAIT]"
+
         print(
-            f"{candle.iso_time()} decision={decision.direction} "
-            f"conf={decision.confidence:.3f}"
+            f"{candle.iso_time()} {action_tag} Dir={decision.direction} "
+            f"Conf={decision.confidence:.3f} (Threshold: {conf_threshold})"
         )
         return False
 
@@ -188,6 +395,7 @@ async def live_loop(
         detail_writer.close()
 
         summary = stats.summary()
+        summary["online_calibration"] = calibrator.summary()
         summary["run_meta"] = {
             "source": "bybit_ws",
             "symbol": symbol,
@@ -210,6 +418,26 @@ async def live_loop(
 
         summary["weights"] = weight_manager.get_model_weights()
 
+        # Sprint 12: Run pattern lifecycle maintenance
+        lifecycle = pattern_store.run_lifecycle_maintenance()
+        summary["pattern_lifecycle"] = lifecycle
+
+        # Sprint 17: Session Adapter summary
+        if session_adapter_enabled:
+            summary["session_adapter"] = {
+                "enabled": True,
+                "sessions": {
+                    session: session_adapter.get_session_summary(session)
+                    for session in ["ASIA", "EUROPE", "US"]
+                },
+            }
+            session_adapter.close()
+        else:
+            summary["session_adapter"] = {"enabled": False}
+
+        # Sprint 20: Online Learning summary
+        summary["online_learning"] = online_adapter.summary()
+
         summary_path = os.path.join(out_dir, "summary.json")
         with open(summary_path, "w", encoding="utf-8") as handle:
             handle.write(json.dumps(summary, ensure_ascii=True, indent=2))
@@ -224,6 +452,9 @@ def run_live(
     tune_weights: bool,
     store_candles: bool,
     overrides: Optional[Dict[str, object]] = None,
+    use_two_head: bool = False,
+    two_head_checkpoint: Optional[str] = None,
+    two_head_model_class: str = "TwoHeadMLP",
 ) -> None:
     asyncio.run(
         live_loop(
@@ -235,5 +466,8 @@ def run_live(
             tune_weights=tune_weights,
             store_candles=store_candles,
             overrides=overrides,
+            use_two_head=use_two_head,
+            two_head_checkpoint=two_head_checkpoint,
+            two_head_model_class=two_head_model_class,
         )
     )
